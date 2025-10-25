@@ -34,17 +34,17 @@ clientapp = "cifar_cnn.client_app:app"
 
 [tool.flwr.app.config]
 # Federated Learning 
-num-clients = 30
+num-clients = 40
 num-server-rounds = 50
-fraction-fit = 0.3 # % clients mỗi round
+fraction-fit = 0.6 # % clients mỗi round
 fraction-evaluate = 0.2
 min-fit-clients = 10 # Tối thiểu 10 clients
 min-evaluate-clients = 6
-min-available-clients = 30  # Tối thiểu 10 clients online
+min-available-clients = 40  # Tối thiểu 10 clients online
 
 # Training settings
 local-epochs = 3
-batch-size = 384
+batch-size = 1024
 learning-rate = 0.001
 
 # FedProx parameter
@@ -88,6 +88,6 @@ enable-defense = true
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 30 # Đây là số Ray actors = số clients
-options.backend.client-resources.num-cpus = 2
-options.backend.client-resources.num-gpus = 0.1
+options.num-supernodes = 40 # Đây là số Ray actors = số clients
+options.backend.client-resources.num-cpus = 4
+options.backend.client-resources.num-gpus = 0.05
