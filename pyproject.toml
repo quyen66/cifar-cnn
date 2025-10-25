@@ -1,0 +1,93 @@
+# =====================================================================
+# For a full TOML configuration guide, check the Flower docs:
+# https://flower.ai/docs/framework/how-to-configure-pyproject-toml.html
+# =====================================================================
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cifar-cnn"
+version = "1.0.0"
+description = ""
+license = "Apache-2.0"
+# Dependencies for your Flower App
+dependencies = [
+    "flwr[simulation]>=1.22.0",
+    "flwr-datasets[vision]>=0.5.0",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "quyen"
+
+# Point to your ServerApp and ClientApp objects
+[tool.flwr.app.components]
+serverapp = "cifar_cnn.server_app:app"
+clientapp = "cifar_cnn.client_app:app"
+
+
+[tool.flwr.app.config]
+# Federated Learning 
+num-clients = 30
+num-server-rounds = 50
+fraction-fit = 0.3 # % clients mỗi round
+fraction-evaluate = 0.2
+min-fit-clients = 10 # Tối thiểu 10 clients
+min-evaluate-clients = 6
+min-available-clients = 30  # Tối thiểu 10 clients online
+
+# Training settings
+local-epochs = 3
+batch-size = 384
+learning-rate = 0.001
+
+# FedProx parameter
+proximal-mu = 0.01  #proximal term (0.01 - 1.0)
+
+# Data partition
+partition-type = "iid"
+
+# GPU optimization
+use-mixed-precision = true
+num-workers = 0
+pin-memory = true
+
+# Attack Configuration
+attack-type = "none"  # Options: "none", "label_flip", "byzantine", "gaussian"
+attack-ratio = 0.0    # 0.1 = 10%, 0.2 = 20%, 0.3 = 30%
+
+# Label Flipping parameters
+flip-probability = 1.0
+flip-type = "reverse"  # "reverse" or "random"
+
+# Byzantine parameters
+byzantine-type = "sign_flip"  # "random", "sign_flip", "scaled"
+byzantine-scale = 10.0
+
+# Gaussian Noise parameters
+noise-std = 0.1  # 0.01 = mild, 0.1 = medium, 1.0 = strong
+
+# Auto-save settings
+auto-save = true
+save-dir = "saved_models"
+save-interval = 10
+
+# Resume training
+resume-from = ""  # Tên folder model hoặc "" để train từ đầu
+
+# Detection settings 
+enable-defense = true
+
+[tool.flwr.federations]
+default = "local-simulation"
+
+[tool.flwr.federations.local-simulation]
+options.num-supernodes = 30 # Đây là số Ray actors = số clients
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 0.1
