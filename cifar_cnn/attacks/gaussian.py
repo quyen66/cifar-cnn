@@ -25,9 +25,17 @@ class GaussianNoiseClient(AttackClient):
         )
         
         benign_params = get_parameters(self.net)
-        noisy_params = [
-            p + np.random.randn(*p.shape).astype(np.float32) * self.noise_std
-            for p in benign_params
-        ]
+        noisy_params = []
+        for p in benign_params:
+            # Ensure p is numpy array
+            if not isinstance(p, np.ndarray):
+                p = np.array(p, dtype=np.float32)
+            
+            # Generate noise with same shape and dtype
+            noise = np.random.standard_normal(p.shape).astype(p.dtype) * self.noise_std
+            
+            # Add noise to parameter
+            noisy_param = p + noise
+            noisy_params.append(noisy_param)
         
         return noisy_params, len(self.trainloader.dataset), results
