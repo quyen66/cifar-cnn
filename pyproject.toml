@@ -38,13 +38,13 @@ num-clients = 40
 num-server-rounds = 50
 fraction-fit = 0.6 # % clients mỗi round
 fraction-evaluate = 0.2
-min-fit-clients = 10 # Tối thiểu 10 clients
+min-fit-clients = 23 
 min-evaluate-clients = 6
 min-available-clients = 40  # Tối thiểu 10 clients online
 
 # Training settings
 local-epochs = 3
-batch-size = 1024
+batch-size = 512
 learning-rate = 0.001
 
 # FedProx parameter

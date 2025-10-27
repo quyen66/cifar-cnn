@@ -10,12 +10,65 @@ from cifar_cnn.model_manager import ModelManager
 from typing import List, Tuple, Optional, Set
 from flwr.common import Metrics, FitRes, Parameters
 from datetime import datetime
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 
 # Import metrics collector
 from cifar_cnn.utils import MetricsCollector
 
 # Import defense components
 from cifar_cnn.defense import Layer1Detector
+
+def visualize_gradients(gradients, client_ids, ground_truth_malicious_ids, server_round):
+    """Trực quan hóa gradients trong không gian 2D PCA."""
+    if not gradients:
+        print("   ⚠️  [Visualize] No gradients to visualize.")
+        return
+
+    # Flatten gradients thành một matrix
+    # Lưu ý: gradients nhận vào đã là vector 1D rồi
+    grad_matrix = np.vstack(gradients)
+
+    # PCA to 2D
+    # Chú ý: pca_dims phải <= số lượng client
+    n_components = min(2, len(gradients))
+    if n_components < 2:
+        print(f"   ⚠️  [Visualize] Not enough data points ({len(gradients)}) for 2D PCA.")
+        return
+        
+    pca = PCA(n_components=n_components)
+    grad_2d = pca.fit_transform(grad_matrix)
+
+    # Chuẩn bị để vẽ
+    plt.figure(figsize=(12, 9))
+    
+    # Xác định client nào là malicious
+    is_malicious_list = [cid in ground_truth_malicious_ids for cid in client_ids]
+    
+    colors = ['blue' if not malicious else 'red' for malicious in is_malicious_list]
+    
+    # Vẽ các điểm
+    for i in range(len(grad_2d)):
+        plt.scatter(grad_2d[i, 0], grad_2d[i, 1], color=colors[i], alpha=0.7)
+        # Ghi chú ID của client bên cạnh điểm
+        plt.text(grad_2d[i, 0], grad_2d[i, 1], str(client_ids[i]), fontsize=9)
+
+    # Tạo legend thủ công để tránh lặp lại
+    benign_patch = plt.Line2D([0], [0], marker='o', color='w', label='Benign Client',
+                              markerfacecolor='blue', markersize=10)
+    malicious_patch = plt.Line2D([0], [0], marker='o', color='w', label='Malicious Client',
+                                 markerfacecolor='red', markersize=10)
+
+    plt.title(f"Gradients in 2D PCA Space (Round {server_round})")
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.legend(handles=[benign_patch, malicious_patch])
+    plt.grid(True)
+    
+    # Lưu hình ảnh thay vì hiển thị trực tiếp (tốt hơn cho server)
+    plt.savefig(f"pca_visualization_round_{server_round}.png")
+    plt.close() # Đóng plot để giải phóng bộ nhớ
+    print(f"   🖼️  PCA visualization saved to: pca_visualization_round_{server_round}.png")
 
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -163,10 +216,20 @@ class CustomFedProx(FedProx):
                 
                 client_results.append((client_proxy, fit_res))
             
+            if server_round in [1, 5, 10]: 
+                print("\n   [Debug] Generating PCA visualization for this round...")
+                visualize_gradients(
+                    gradients=gradients,
+                    client_ids=client_ids,
+                    ground_truth_malicious_ids=self.malicious_clients,
+                    server_round=server_round
+                )
+            ground_truth_list = [cid in self.malicious_clients for cid in client_ids]
             # Run Layer 1 Detection
             detection_results = self.layer1_detector.detect(
                 gradients=gradients,
                 client_ids=client_ids,
+                is_malicious_ground_truth=ground_truth_list, 
                 current_round=server_round
             )
             
