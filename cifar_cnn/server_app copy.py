@@ -12,7 +12,6 @@ from flwr.common import Metrics, FitRes, Parameters
 from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
-from cifar_cnn.aggregation_methods import aggregate_by_mode, decide_mode_simple
 
 # Import metrics collector
 from cifar_cnn.utils import MetricsCollector
@@ -320,37 +319,7 @@ class CustomFedProx(FedProx):
                 print(f"   ⚠️  Warning: Only {len(results)} clients left after filtering (min={self.min_fit_clients})")
         
         # Standard aggregation with (filtered) results
-        # Extract gradients từ filtered results
-        trusted_gradients = []
-        for client_proxy, fit_res in results:
-            params = parameters_to_ndarrays(fit_res.parameters)
-            gradient = np.concatenate([p.flatten() for p in params])
-            trusted_gradients.append(gradient)
-
-        # Compute threat ratio
-        n_total = len(client_results)  # Before filtering
-        n_trusted = len(trusted_gradients)  # After filtering
-        threat_ratio = (n_total - n_trusted) / n_total if n_total > 0 else 0.0
-
-        # Decide mode
-        mode = decide_mode_simple(threat_ratio)
-        print(f"   Threat: {threat_ratio:.1%} → Mode: {mode}")
-
-        # Aggregate using mode-specific method
-        aggregated_gradient = aggregate_by_mode(trusted_gradients, mode=mode)
-
-        # Reshape back to parameters
-        param_shapes = [p.shape for p in parameters_to_ndarrays(results[0][1].parameters)]
-        aggregated_params = []
-        offset = 0
-        for shape in param_shapes:
-            size = int(np.prod(shape))  # ← FIX: Convert to Python int!
-            param = aggregated_gradient[offset:offset+size].reshape(shape)
-            aggregated_params.append(param)
-            offset += size
-        # Convert to Flower format
-        aggregated_parameters = ndarrays_to_parameters(aggregated_params)
-        aggregated = (aggregated_parameters, {"mode": mode, "threat_ratio": threat_ratio})
+        aggregated = super().aggregate_fit(server_round, results, failures)
         
         if aggregated is not None:
             self.current_parameters, _ = aggregated
