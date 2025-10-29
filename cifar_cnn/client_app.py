@@ -1,4 +1,4 @@
-"""Flower client implementation - GPU OPTIMIZED."""
+"""Flower client implementation - WITH FEDPROX SUPPORT."""
 
 import os
 import torch
@@ -30,10 +30,10 @@ else:
 
 
 class FlowerClient(NumPyClient):
-    """Normal benign client - GPU OPTIMIZED."""
+    """Normal benign client with FedProx support."""
     
     def __init__(self, net, trainloader, testloader, device, local_epochs, 
-                 learning_rate=0.001, use_mixed_precision=True):
+                 learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01):
         self.net = net
         self.trainloader = trainloader
         self.testloader = testloader
@@ -41,23 +41,35 @@ class FlowerClient(NumPyClient):
         self.local_epochs = local_epochs
         self.learning_rate = learning_rate
         self.use_mixed_precision = use_mixed_precision
+        self.proximal_mu = proximal_mu
         
         # FORCE move model to GPU
         self.net = self.net.to(self.device)
     
     def fit(self, parameters, config):
+        """Train with FedProx proximal term."""
         set_parameters(self.net, parameters)
-        # Ensure model on GPU
         self.net = self.net.to(self.device)
         
+        # Store global parameters for FedProx (convert to tensors)
+        global_params = [torch.tensor(p, device=self.device) for p in parameters]
+        
+        # Train with FedProx
         results = train(
-            self.net, self.trainloader, epochs=self.local_epochs,
-            device=self.device, learning_rate=self.learning_rate,
-            use_mixed_precision=self.use_mixed_precision
+            self.net, 
+            self.trainloader, 
+            epochs=self.local_epochs,
+            device=self.device, 
+            learning_rate=self.learning_rate,
+            use_mixed_precision=self.use_mixed_precision,
+            proximal_mu=self.proximal_mu,
+            global_params=global_params
         )
+        
         return get_parameters(self.net), len(self.trainloader.dataset), results
     
     def evaluate(self, parameters, config):
+        """Standard evaluation."""
         set_parameters(self.net, parameters)
         self.net = self.net.to(self.device)
         
@@ -66,7 +78,7 @@ class FlowerClient(NumPyClient):
 
 
 def client_fn(context: Context) -> Client:
-    """Tạo client với GPU support."""
+    """Create client with FedProx support."""
     
     # ============================================
     # FORCE GPU DEVICE
@@ -88,6 +100,9 @@ def client_fn(context: Context) -> Client:
     learning_rate = context.run_config["learning-rate"]
     use_mixed_precision = context.run_config.get("use-mixed-precision", True)
     partition_type = context.run_config.get("partition-type", "iid")
+    
+    # FedProx parameter
+    proximal_mu = context.run_config.get("proximal-mu", 0.01)
     
     # GPU optimization
     num_workers = context.run_config.get("num-workers", 0)  # 0 for GPU (faster)
@@ -114,17 +129,17 @@ def client_fn(context: Context) -> Client:
     if not is_attacker or attack_type == "none":
         return FlowerClient(
             net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision
+            learning_rate, use_mixed_precision, proximal_mu
         ).to_client()
     
-    # Attack clients (all GPU-enabled)
+    # Attack clients (all GPU-enabled + FedProx)
     if attack_type == "label_flip":
         flip_probability = context.run_config.get("flip-probability", 1.0)
         flip_type = context.run_config.get("flip-type", "reverse")
         
         return LabelFlippingClient(
             net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision,
+            learning_rate, use_mixed_precision, proximal_mu,
             flip_probability, flip_type
         ).to_client()
     
@@ -134,7 +149,7 @@ def client_fn(context: Context) -> Client:
         
         return ByzantineClient(
             net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision,
+            learning_rate, use_mixed_precision, proximal_mu,
             byzantine_type, byzantine_scale
         ).to_client()
     
@@ -143,7 +158,7 @@ def client_fn(context: Context) -> Client:
         
         return GaussianNoiseClient(
             net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision,
+            learning_rate, use_mixed_precision, proximal_mu,
             noise_std
         ).to_client()
     
@@ -152,14 +167,14 @@ def client_fn(context: Context) -> Client:
         
         return ALIEClient(
             net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision,
+            learning_rate, use_mixed_precision, proximal_mu,
             z_perturbation
         ).to_client()
     
     else:
         return FlowerClient(
             net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision
+            learning_rate, use_mixed_precision, proximal_mu
         ).to_client()
 
 

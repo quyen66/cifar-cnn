@@ -1,30 +1,30 @@
-"""Gaussian Noise Attack."""
+"""Gaussian Noise Attack - WITH FEDPROX SUPPORT."""
 
 import numpy as np
 from .base import AttackClient
-from cifar_cnn.task import train, get_parameters, set_parameters
+from cifar_cnn.task import get_parameters
 
 
 class GaussianNoiseClient(AttackClient):
-    """Gaussian Noise Attack - Thêm noise vào gradients."""
+    """Gaussian Noise Attack - Train with FedProx, then add noise to gradients."""
     
     def __init__(self, net, trainloader, testloader, device, local_epochs,
-                 learning_rate=0.001, use_mixed_precision=True,
+                 learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
                  noise_std=0.1):
         super().__init__(net, trainloader, testloader, device,
-                        local_epochs, learning_rate, use_mixed_precision)
+                        local_epochs, learning_rate, use_mixed_precision, proximal_mu)
         self.noise_std = noise_std
     
     def fit(self, parameters, config):
-        """Train normally, then add Gaussian noise."""
-        set_parameters(self.net, parameters)
-        results = train(
-            self.net, self.trainloader, epochs=self.local_epochs,
-            device=self.device, learning_rate=self.learning_rate,
-            use_mixed_precision=self.use_mixed_precision
-        )
+        """Train with FedProx, then add Gaussian noise."""
         
+        # Train normally with FedProx
+        results = self.train_with_fedprox(parameters)
+        
+        # Get benign parameters
         benign_params = get_parameters(self.net)
+        
+        # Add Gaussian noise
         noisy_params = []
         for p in benign_params:
             # Ensure p is numpy array

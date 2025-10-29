@@ -1,4 +1,4 @@
-"""Model definition and training/testing functions."""
+"""Model definition and training/testing functions - WITH FEDPROX."""
 
 import torch
 import torch.nn as nn
@@ -56,13 +56,38 @@ def get_model():
     return CNN(num_classes=10)
 
 
-def train(net, trainloader, epochs, device, learning_rate=0.001, use_mixed_precision=True):
+def train(net, trainloader, epochs, device, learning_rate=0.001, 
+          use_mixed_precision=True, proximal_mu=0.0, global_params=None):
+    """
+    Train with optional FedProx proximal term.
+    
+    Args:
+        net: Model to train
+        trainloader: Training data loader
+        epochs: Number of local epochs
+        device: Device to use (cuda/cpu)
+        learning_rate: Learning rate
+        use_mixed_precision: Use mixed precision training
+        proximal_mu: FedProx proximal coefficient (0.01 recommended)
+        global_params: Global model parameters for FedProx
+                       List of tensors in same format as net.parameters()
+    
+    Returns:
+        dict with train_loss
+    """
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=learning_rate)
     scaler = torch.amp.GradScaler('cuda') if use_mixed_precision and device.type == 'cuda' else None
     
     net.train()
     net.to(device)
+    
+    # Convert global_params to device if provided
+    if global_params is not None and proximal_mu > 0:
+        global_params = [p.to(device) if isinstance(p, torch.Tensor) 
+                        else torch.tensor(p, device=device) 
+                        for p in global_params]
+    
     total_loss = 0.0
     
     for epoch in range(epochs):
@@ -72,25 +97,52 @@ def train(net, trainloader, epochs, device, learning_rate=0.001, use_mixed_preci
             optimizer.zero_grad(set_to_none=True)
             
             if scaler is not None:
+                # Mixed precision training
                 with torch.amp.autocast('cuda'):
                     outputs = net(images)
-                    loss = criterion(outputs, labels)
-                scaler.scale(loss).backward()
+                    ce_loss = criterion(outputs, labels)
+                    
+                    # FedProx proximal term
+                    if global_params is not None and proximal_mu > 0:
+                        proximal_loss = 0.0
+                        for local_param, global_param in zip(net.parameters(), global_params):
+                            proximal_loss += ((local_param - global_param) ** 2).sum()
+                        proximal_loss = (proximal_mu / 2) * proximal_loss
+                    else:
+                        proximal_loss = 0.0
+                    
+                    total_batch_loss = ce_loss + proximal_loss
+                
+                scaler.scale(total_batch_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
+                # Standard training
                 outputs = net(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
+                ce_loss = criterion(outputs, labels)
+                
+                # FedProx proximal term
+                if global_params is not None and proximal_mu > 0:
+                    proximal_loss = 0.0
+                    for local_param, global_param in zip(net.parameters(), global_params):
+                        proximal_loss += ((local_param - global_param) ** 2).sum()
+                    proximal_loss = (proximal_mu / 2) * proximal_loss
+                else:
+                    proximal_loss = 0.0
+                
+                total_batch_loss = ce_loss + proximal_loss
+                total_batch_loss.backward()
                 optimizer.step()
             
-            epoch_loss += loss.item()
+            epoch_loss += total_batch_loss.item()
+        
         total_loss += epoch_loss / len(trainloader)
     
     return {"train_loss": total_loss / epochs}
 
 
 def test(net, testloader, device):
+    """Test model accuracy."""
     criterion = nn.CrossEntropyLoss()
     net.eval()
     net.to(device)
@@ -113,10 +165,12 @@ def test(net, testloader, device):
 
 
 def get_parameters(net):
+    """Get model parameters as numpy arrays."""
     return [val.cpu().numpy() for _, val in net.state_dict().items()]
 
 
 def set_parameters(net, parameters):
+    """Set model parameters from numpy arrays."""
     params_dict = zip(net.state_dict().keys(), parameters)
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
     net.load_state_dict(state_dict, strict=True)
