@@ -48,6 +48,21 @@ def load_optimal_params(json_file: Path) -> Dict:
     best = results[0]
     params = best['params']
     
+    # Default values (nếu params không có trong test results)
+    defaults = {
+        'pca_dims': 20,
+        'dbscan_min_samples': 3,
+        'dbscan_eps_multiplier': 0.5,
+        'mad_k_normal': 4.0,
+        'mad_k_warmup': 6.0,
+        'voting_threshold_normal': 2,
+        'voting_threshold_warmup': 3,
+        'warmup_rounds': 10
+    }
+    
+    # Merge với defaults
+    full_params = {**defaults, **params}
+    
     # Get performance metrics
     if 'average' in best:
         metrics = best['average']
@@ -60,7 +75,7 @@ def load_optimal_params(json_file: Path) -> Dict:
     else:
         metrics = {}
     
-    return params, metrics
+    return full_params, metrics
 
 
 def backup_file(filepath: Path):

@@ -52,7 +52,8 @@ class FlowerClient(NumPyClient):
         self.net = self.net.to(self.device)
         
         # Store global parameters for FedProx (convert to tensors)
-        global_params = [torch.tensor(p, device=self.device) for p in parameters]
+        global_params = [p.clone().detach() for p in self.net.parameters()]
+
         
         # Train with FedProx
         results = train(

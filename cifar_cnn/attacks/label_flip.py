@@ -68,7 +68,8 @@ class LabelFlippingClient(AttackClient):
         set_parameters(self.net, parameters)
         
         # Store global parameters for FedProx
-        global_params = [torch.tensor(p, device=self.device) for p in parameters]
+        global_params = [p.clone().detach() for p in self.net.parameters()]
+
         
         # Train on flipped data with FedProx
         results = train(

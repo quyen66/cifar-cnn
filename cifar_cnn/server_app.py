@@ -192,16 +192,17 @@ class CustomFedProx(FedProx):
             avg_loss = sum([r.metrics.get("train_loss", 0) for _, r in results]) / len(results)
             self.loss_history.append((server_round, avg_loss))
         
+        # Extract gradients and client IDs
+        gradients = []
+        client_ids = []
+        client_results = []
+            
         # ============================================
         # LAYER 1 DEFENSE INTEGRATION
         # ============================================
         if self.enable_defense:
             print(f"\n[Round {server_round}] 🛡️  Running Layer 1 Detection...")
             
-            # Extract gradients and client IDs
-            gradients = []
-            client_ids = []
-            client_results = []
             
             for client_proxy, fit_res in results:
                 # Get client ID (from proxy or generate)

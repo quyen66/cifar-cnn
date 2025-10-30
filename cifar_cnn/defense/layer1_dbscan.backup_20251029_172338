@@ -200,7 +200,7 @@ class Layer1Detector:
                     flags.append(False)
         
         # DBSCAN votes: weight=1 (moderate confidence)
-        votes = [2 if flag else 0 for flag in flags]
+        votes = [1 if flag else 0 for flag in flags]
         
         # Log results
         num_outliers = sum(labels == -1)
