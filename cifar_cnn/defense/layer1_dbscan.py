@@ -200,7 +200,7 @@ class Layer1Detector:
                     flags.append(False)
         
         # DBSCAN votes: weight=1 (moderate confidence)
-        votes = [2 if flag else 0 for flag in flags]
+        votes = [1 if flag else 0 for flag in flags]
         
         # Log results
         num_outliers = sum(labels == -1)
@@ -242,7 +242,7 @@ class Layer1Detector:
         # Voting threshold
         # Warmup: threshold=3 (strict, avoid false positives)
         # Normal: threshold=2 (balanced)
-        threshold = 2 if is_warmup else 2
+        threshold = 4 if is_warmup else 3
         
         # Flag if votes >= threshold
         flags = [votes >= threshold for votes in total_votes]
