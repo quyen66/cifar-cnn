@@ -28,7 +28,7 @@ echo "📊 TEST 1: Byzantine 30% - NO DEFENSE (Baseline)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="byzantine" attack-ratio=0.3 byzantine-type="sign_flip" byzantine-scale=1.0 enable-defense=false save-dir="'$SAVE_DIR'/byzantine_nodefense" save-interval=5'
+flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="byzantine" attack-ratio=0.3 byzantine-type="sign_flip" byzantine-scale=2.0 enable-defense=false save-dir="'$SAVE_DIR'/byzantine_nodefense" save-interval=5'
 
 echo ""
 echo "✓ Test 1 completed"
@@ -43,7 +43,7 @@ echo "📊 TEST 2: Byzantine 30% - WITH DEFENSE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="byzantine" attack-ratio=0.3 byzantine-type="sign_flip" byzantine-scale=10.0 enable-defense=true save-dir="'$SAVE_DIR'/byzantine_defense" save-interval=5'
+flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="byzantine" attack-ratio=0.3 byzantine-type="sign_flip" byzantine-scale=2.0 enable-defense=true save-dir="'$SAVE_DIR'/byzantine_defense" save-interval=5'
 
 echo ""
 echo "✓ Test 2 completed"
@@ -58,7 +58,7 @@ echo "📊 TEST 3: Gaussian 30% - NO DEFENSE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="gaussian" attack-ratio=0.3 noise-std=0.1 enable-defense=false save-dir="'$SAVE_DIR'/gaussian_nodefense" save-interval=5'
+flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="gaussian" attack-ratio=0.3 noise-std=0.2 enable-defense=false save-dir="'$SAVE_DIR'/gaussian_nodefense" save-interval=5'
 
 echo ""
 echo "✓ Test 3 completed"
@@ -73,7 +73,7 @@ echo "📊 TEST 4: Gaussian 30% - WITH DEFENSE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="gaussian" attack-ratio=0.3 noise-std=0.1 enable-defense=true save-dir="'$SAVE_DIR'/gaussian_defense" save-interval=5'
+flwr run . --run-config 'num-clients='$NUM_CLIENTS' num-server-rounds='$NUM_ROUNDS' partition-type="iid" attack-type="gaussian" attack-ratio=0.3 noise-std=0.2 enable-defense=true save-dir="'$SAVE_DIR'/gaussian_defense" save-interval=5'
 
 echo ""
 echo "✓ Test 4 completed"

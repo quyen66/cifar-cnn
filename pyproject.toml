@@ -44,7 +44,7 @@ min-available-clients = 40  # Tối thiểu 10 clients online
 
 # Training settings
 local-epochs = 3
-batch-size = 512
+batch-size = 1024
 learning-rate = 0.001
 
 # FedProx parameter
@@ -68,7 +68,7 @@ flip-type = "reverse"  # "reverse" or "random"
 
 # Byzantine parameters
 byzantine-type = "sign_flip"  # "random", "sign_flip", "scaled"
-byzantine-scale = 10.0
+byzantine-scale = 2.0
 
 # Gaussian Noise parameters
 noise-std = 0.1  # 0.01 = mild, 0.1 = medium, 1.0 = strong

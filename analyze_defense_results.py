@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Analyze Detection Metrics (TP/FP/FN/TN)
+Analyze Detection Metrics (TP/FP/FN/TN) - FIXED VERSION
 Extract and visualize defense performance from experiments
+
+FIXES:
+1. Handle missing attack types (KeyError fix)
+2. Better error messages
+3. Improved analysis output
 """
 
 import os
@@ -165,6 +170,8 @@ def print_detection_summary(experiments):
 
 def plot_detection_metrics(experiments, save_dir='results'):
     """Plot detection metrics over rounds."""
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
     
     # Create figure with subplots
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
@@ -202,6 +209,12 @@ def plot_detection_metrics(experiments, save_dir='results'):
                         'detection_rate': [h.get('detection_rate', 0) for h in detection_history],
                         'fpr': [h.get('fpr', 0) for h in detection_history]
                     }
+    
+    # Check if we have any data
+    if not all_data:
+        print("⚠️  No detection data available for plotting")
+        plt.close()
+        return
     
     # Plot 1: Detection Rate over rounds
     ax1 = axes[0, 0]
@@ -246,7 +259,7 @@ def plot_detection_metrics(experiments, save_dir='results'):
     ax3.legend(fontsize=9, ncol=2)
     ax3.grid(True, alpha=0.3)
     
-    # Plot 4: Summary bar chart
+    # Plot 4: Summary bar chart (FIXED - check available attacks)
     ax4 = axes[1, 1]
     metrics_summary = {}
     for attack_type, data in all_data.items():
@@ -263,11 +276,19 @@ def plot_detection_metrics(experiments, save_dir='results'):
             'FPR': fpr_avg
         }
     
-    x = np.arange(len(attack_types))
+    # FIXED: Only use attack types that have data
+    available_attacks = [at for at in attack_types if at in metrics_summary]
+    
+    if not available_attacks:
+        print("⚠️  No attack data available for summary plot")
+        plt.close()
+        return
+    
+    x = np.arange(len(available_attacks))
     width = 0.35
     
-    det_rates = [metrics_summary[at]['Detection Rate'] for at in attack_types]
-    fprs = [metrics_summary[at]['FPR'] for at in attack_types]
+    det_rates = [metrics_summary[at]['Detection Rate'] for at in available_attacks]
+    fprs = [metrics_summary[at]['FPR'] for at in available_attacks]
     
     bars1 = ax4.bar(x - width/2, det_rates, width, label='Detection Rate', color='#27ae60', alpha=0.8)
     bars2 = ax4.bar(x + width/2, fprs, width, label='False Positive Rate', color='#e74c3c', alpha=0.8)
@@ -276,7 +297,7 @@ def plot_detection_metrics(experiments, save_dir='results'):
     ax4.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
     ax4.set_title('Overall Performance Summary', fontsize=13, fontweight='bold')
     ax4.set_xticks(x)
-    ax4.set_xticklabels([attack_names[at] for at in attack_types])
+    ax4.set_xticklabels([attack_names[at] for at in available_attacks])
     ax4.legend(fontsize=11)
     ax4.grid(True, alpha=0.3, axis='y')
     
@@ -339,15 +360,73 @@ def main():
     print("="*80)
     print("\n📊 Generated files:")
     print("   • results/detection_metrics.png")
-    print("\n💡 Key Findings:")
-    print("   • Check Detection Rate (should be >80% for Byzantine/Gaussian)")
-    print("   • Check False Positive Rate (should be <10%)")
-    print("   • Label Flip typically has lower detection (~20-40%)")
-    print("\n📝 Next Steps:")
-    print("   • Review confusion matrices above")
-    print("   • Compare different attack types")
-    print("   • Ready for Layer 2 Detection (Week 3) to improve Label Flip detection")
-    print("\n" + "="*80 + "\n")
+    
+    # ADD CRITICAL ANALYSIS
+    print("\n" + "="*80)
+    print("⚠️  CRITICAL ANALYSIS - LAYER 1 PERFORMANCE")
+    print("="*80)
+    
+    # Analyze performance
+    for exp_name, data in defense_experiments.items():
+        defense_stats = data.get('defense_stats', {})
+        total_tp = defense_stats.get('total_tp', 0)
+        total_fp = defense_stats.get('total_fp', 0)
+        total_fn = defense_stats.get('total_fn', 0)
+        total_tn = defense_stats.get('total_tn', 0)
+        
+        if (total_tp + total_fn) == 0:
+            continue
+            
+        detection_rate = total_tp / (total_tp + total_fn) * 100
+        fpr = total_fp / (total_fp + total_tn) * 100 if (total_fp + total_tn) > 0 else 0
+        
+        attack_type = "Unknown"
+        if 'byzantine' in exp_name:
+            attack_type = "Byzantine"
+        elif 'gaussian' in exp_name:
+            attack_type = "Gaussian"
+        elif 'labelflip' in exp_name:
+            attack_type = "Label Flip"
+        
+        print(f"\n🔍 {attack_type} Attack Analysis:")
+        print(f"   Detection Rate: {detection_rate:.1f}%")
+        
+        if detection_rate < 50:
+            print(f"   ❌ VERY LOW - Target is 80-90%")
+            print(f"   📝 Suggestions:")
+            print(f"      • Decrease mad_k_normal (try 3.0)")
+            print(f"      • Decrease voting_threshold (try 1)")
+            print(f"      • Increase dbscan_eps_multiplier (try 0.6-0.7)")
+        elif detection_rate < 70:
+            print(f"   ⚠️  LOW - Needs improvement")
+            print(f"   📝 Suggestions:")
+            print(f"      • Fine-tune mad_k_normal (try 3.5)")
+            print(f"      • Adjust voting_threshold")
+        else:
+            print(f"   ✅ GOOD - Meeting target")
+        
+        print(f"\n   False Positive Rate: {fpr:.1f}%")
+        if fpr > 15:
+            print(f"   ❌ TOO HIGH - Target is <10%")
+            print(f"   📝 Suggestions:")
+            print(f"      • Increase mad_k_normal (try 5.0)")
+            print(f"      • Increase voting_threshold (try 3)")
+            print(f"      • Decrease dbscan_eps_multiplier (try 0.4)")
+        elif fpr > 10:
+            print(f"   ⚠️  ACCEPTABLE but can improve")
+        else:
+            print(f"   ✅ GOOD - Meeting target")
+    
+    print("\n" + "="*80)
+    print("💡 NEXT STEPS:")
+    print("="*80)
+    print("1. Run hyperparameter tuning:")
+    print("   python test_layer1_hyperparam_comprehensive.py")
+    print("\n2. Apply optimal config:")
+    print("   python apply_optimal_config.py")
+    print("\n3. Re-run experiments with tuned parameters")
+    print("\n4. If Layer 1 still insufficient, proceed to Layer 2 (Week 3)")
+    print("="*80 + "\n")
 
 
 if __name__ == "__main__":

@@ -218,7 +218,7 @@ class CustomFedProx(FedProx):
                 
                 client_results.append((client_proxy, fit_res))
             
-            if server_round in [1, 5, 10]: 
+            if server_round % 5 == 0: 
                 print("\n   [Debug] Generating PCA visualization for this round...")
                 visualize_gradients(
                     gradients=gradients,

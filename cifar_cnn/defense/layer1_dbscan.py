@@ -27,7 +27,7 @@ class Layer1Detector:
     def __init__(self, 
                  pca_dims: int = 20,
                  dbscan_min_samples: int = 2,
-                 warmup_rounds: int = 10):
+                 warmup_rounds: int = 15):
         """
         Args:
             pca_dims: Number of PCA dimensions (default=20)
@@ -130,7 +130,7 @@ class Layer1Detector:
         
         # Threshold with adaptive k
         # Warmup: k=6.0 (looser), Normal: k=4.0 (stricter)
-        k = 5.0 if is_warmup else 3.0
+        k = 4.0 if is_warmup else 2.5
         threshold = median_norm + k * mad
         
         # Flag outliers
@@ -178,7 +178,7 @@ class Layer1Detector:
         # Set eps to 0.5 × median pairwise distance
         # This adapts to the spread of the data
         median_dist = np.median(pairwise_dists[np.triu_indices(n, k=1)])
-        eps = 0.3 * median_dist
+        eps = 0.6 * median_dist
         
         # Run DBSCAN
         dbscan = DBSCAN(eps=eps, min_samples=self.dbscan_min_samples)
@@ -242,7 +242,7 @@ class Layer1Detector:
         # Voting threshold
         # Warmup: threshold=3 (strict, avoid false positives)
         # Normal: threshold=2 (balanced)
-        threshold = 4 if is_warmup else 3
+        threshold = 2 if is_warmup else 1
         
         # Flag if votes >= threshold
         flags = [votes >= threshold for votes in total_votes]
