@@ -130,7 +130,7 @@ class Layer1Detector:
         
         # Threshold with adaptive k
         # Warmup: k=6.0 (looser), Normal: k=4.0 (stricter)
-        k = 4.0 if is_warmup else 2.5
+        k = 6.0 if is_warmup else 4.0
         threshold = median_norm + k * mad
         
         # Flag outliers
@@ -178,7 +178,7 @@ class Layer1Detector:
         # Set eps to 0.5 × median pairwise distance
         # This adapts to the spread of the data
         median_dist = np.median(pairwise_dists[np.triu_indices(n, k=1)])
-        eps = 0.6 * median_dist
+        eps = 0.5 * median_dist
         
         # Run DBSCAN
         dbscan = DBSCAN(eps=eps, min_samples=self.dbscan_min_samples)
@@ -242,7 +242,7 @@ class Layer1Detector:
         # Voting threshold
         # Warmup: threshold=3 (strict, avoid false positives)
         # Normal: threshold=2 (balanced)
-        threshold = 2 if is_warmup else 1
+        threshold = 3 if is_warmup else 1
         
         # Flag if votes >= threshold
         flags = [votes >= threshold for votes in total_votes]
@@ -258,67 +258,3 @@ class Layer1Detector:
             'pca_fitted': self.pca is not None
         }
 
-
-# ============================================
-# TESTING CODE
-# ============================================
-
-def test_layer1_detector():
-    """Test Layer 1 Detector with synthetic data."""
-    print("\n" + "="*60)
-    print("🧪 TESTING LAYER 1 DETECTOR")
-    print("="*60)
-    
-    # Create detector
-    detector = Layer1Detector()
-    
-    # Generate synthetic gradients
-    np.random.seed(42)
-    n_benign = 15
-    n_malicious = 5
-    dim = 1000
-    
-    # Benign clients: normal gradients
-    benign_grads = [np.random.randn(dim) * 0.1 for _ in range(n_benign)]
-    
-    # Malicious clients: Byzantine attack (large magnitude)
-    malicious_grads = [np.random.randn(dim) * 10.0 for _ in range(n_malicious)]
-    
-    # Combine
-    all_grads = benign_grads + malicious_grads
-    client_ids = list(range(n_benign + n_malicious))
-    
-    print(f"\n📊 Test Setup:")
-    print(f"   - Benign clients: {n_benign}")
-    print(f"   - Malicious clients: {n_malicious}")
-    print(f"   - Gradient dimension: {dim}")
-    
-    # Test detection
-    print(f"\n🔍 Running detection (round 1 - warmup)...")
-    results_warmup = detector.detect(all_grads, client_ids, current_round=1)
-    
-    print(f"\n🔍 Running detection (round 15 - normal)...")
-    results_normal = detector.detect(all_grads, client_ids, current_round=15)
-    
-    # Analyze results
-    true_malicious = set(range(n_benign, n_benign + n_malicious))
-    detected_warmup = set([cid for cid, flag in results_warmup.items() if flag])
-    detected_normal = set([cid for cid, flag in results_normal.items() if flag])
-    
-    print(f"\n📈 Results:")
-    print(f"   Warmup mode (round 1):")
-    print(f"      - Detected: {len(detected_warmup)}/{n_malicious + n_benign}")
-    print(f"      - True Positives: {len(detected_warmup & true_malicious)}/{n_malicious}")
-    print(f"      - False Positives: {len(detected_warmup - true_malicious)}")
-    
-    print(f"   Normal mode (round 15):")
-    print(f"      - Detected: {len(detected_normal)}/{n_malicious + n_benign}")
-    print(f"      - True Positives: {len(detected_normal & true_malicious)}/{n_malicious}")
-    print(f"      - False Positives: {len(detected_normal - true_malicious)}")
-    
-    print("\n✅ Test complete!")
-    print("="*60 + "\n")
-
-
-if __name__ == "__main__":
-    test_layer1_detector()
