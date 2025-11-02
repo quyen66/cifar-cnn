@@ -25,21 +25,7 @@ from flwr.common import Metrics, FitRes, Parameters
 from datetime import datetime
 
 # Import ALL defense components
-from cifar_cnn.defense import Layer1Detector, Layer2Detector, ReputationSystem
-from cifar_cnn.aggregation_methods import aggregate_by_mode
-
-# NOTE: These modules are created in outputs, need to be copied to cifar_cnn/defense/
-# from cifar_cnn.defense.noniid_handler import NonIIDHandler
-# from cifar_cnn.defense.filtering import TwoStageFilter
-# from cifar_cnn.defense.mode_controller import ModeController
-
-# Temporary import from outputs (for testing)
-import sys
-sys.path.insert(0, '/mnt/user-data/outputs')
-from noniid_handler import NonIIDHandler
-from two_stage_filtering import TwoStageFilter
-from mode_controller import ModeController
-
+from cifar_cnn.defense import Layer1Detector, Layer2Detector, ReputationSystem, aggregate_by_mode, NonIIDHandler, TwoStageFilter, ModeController
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     """Tính trung bình có trọng số của metrics."""
@@ -586,6 +572,7 @@ def server_fn(context: Context) -> ServerAppComponents:
         min_fit_clients=min_fit_clients,
         min_evaluate_clients=min_evaluate_clients,
         min_available_clients=min_available_clients,
+        fit_metrics_aggregation_fn=weighted_average,
         evaluate_metrics_aggregation_fn=weighted_average,
         initial_parameters=ndarrays_to_parameters(get_parameters(net)),
         proximal_mu=proximal_mu,

@@ -44,7 +44,7 @@ min-available-clients = 40  # Tối thiểu 10 clients online
 
 # Training settings
 local-epochs = 3
-batch-size = 1024
+batch-size = 512
 learning-rate = 0.001
 
 # FedProx parameter

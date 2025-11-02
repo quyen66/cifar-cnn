@@ -1,23 +1,14 @@
 """
-Mode-Adaptive Aggregation Methods for Flower Server
-====================================================
+Mode-Adaptive Aggregation - Week 3
+===================================
+3 phương thức tổng hợp thích ứng cho hệ thống phòng thủ lai.
 
-3 aggregation modes theo main.pdf:
-- NORMAL (ρ ≤ 15%): Weighted Average (uniform weights)
-- ALERT (15% < ρ ≤ 30%): Trimmed Mean 10%
-- DEFENSE (ρ > 30%): Coordinate Median
+Modes:
+- NORMAL (ρ ≤ 0.15): Weighted Average
+- ALERT (0.15 < ρ ≤ 0.30): Trimmed Mean 10%
+- DEFENSE (ρ > 0.30): Coordinate Median
 
-Usage trong CustomFedProx.aggregate_fit():
-    # After filtering malicious clients
-    trusted_gradients = [...]
-    mode = decide_mode(threat_ratio)  # NORMAL/ALERT/DEFENSE
-    
-    aggregated_params = aggregate_by_mode(
-        gradients=trusted_gradients,
-        mode=mode
-    )
-
-Author: Adaptive Defense System - Week 3
+Author: Week 3 Implementation
 """
 
 import numpy as np
@@ -188,37 +179,11 @@ def aggregate_by_mode(
         raise ValueError(f"Unknown mode: {mode}. Use NORMAL/ALERT/DEFENSE")
 
 
-def decide_mode_simple(threat_ratio: float) -> str:
-    """
-    Simple mode decision based on threat ratio.
-    
-    PLACEHOLDER - Sẽ được replace bằng full mode decision logic
-    trong Week 4-5 (với reputation gates, hysteresis, etc.)
-    
-    Args:
-        threat_ratio: Ratio of detected malicious clients (0.0 to 1.0)
-    
-    Returns:
-        Mode string: "NORMAL", "ALERT", or "DEFENSE"
-    
-    Boundaries:
-        - ρ ≤ 0.15 → NORMAL
-        - 0.15 < ρ ≤ 0.30 → ALERT
-        - ρ > 0.30 → DEFENSE
-    """
-    if threat_ratio <= 0.15:
-        return "NORMAL"
-    elif threat_ratio <= 0.30:
-        return "ALERT"
-    else:
-        return "DEFENSE"
-
-
 # ============================================
 # TESTING CODE
 # ============================================
 
-def test_aggregation_methods():
+def test_aggregation():
     """Test 3 aggregation methods với synthetic data."""
     print("\n" + "="*70)
     print("🧪 TESTING AGGREGATION METHODS")
@@ -264,26 +229,8 @@ def test_aggregation_methods():
     print(f"   ALERT (Trimmed Mean):   norm = {np.linalg.norm(agg_alert):.2f}")
     print(f"   DEFENSE (Median):       norm = {np.linalg.norm(agg_defense):.2f}")
     
-    # Test 3: Mode decision
-    print(f"\n🔬 Test 3: Mode Decision")
-    
-    test_cases = [
-        (0.0, "NORMAL"),
-        (0.10, "NORMAL"),
-        (0.15, "NORMAL"),
-        (0.20, "ALERT"),
-    (0.30, "ALERT"),
-        (0.35, "DEFENSE"),
-        (0.50, "DEFENSE"),
-    ]
-    
-    for threat_ratio, expected_mode in test_cases:
-        mode = decide_mode_simple(threat_ratio)
-        status = "✓" if mode == expected_mode else "✗"
-        print(f"   {status} ρ={threat_ratio:.2f} → {mode} (expected: {expected_mode})")
-    
-    # Test 4: aggregate_by_mode
-    print(f"\n🔬 Test 4: aggregate_by_mode Function")
+    # Test 3: aggregate_by_mode
+    print(f"\n🔬 Test 3: aggregate_by_mode Function")
     
     for mode in ["NORMAL", "ALERT", "DEFENSE"]:
         agg = aggregate_by_mode(benign_grads, mode=mode)
@@ -295,4 +242,4 @@ def test_aggregation_methods():
 
 
 if __name__ == "__main__":
-    test_aggregation_methods()
+    test_aggregation()

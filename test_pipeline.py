@@ -8,8 +8,7 @@ sys.path.insert(0, '/mnt/user-data/outputs')
 sys.path.insert(0, '/mnt/project')
 
 # Import components
-from cifar_cnn.defense import Layer1Detector, Layer2Detector, ReputationSystem, NonIIDHandler, TwoStageFilter, ModeController
-from cifar_cnn.aggregation_methods import aggregate_by_mode
+from cifar_cnn.defense import Layer1Detector, Layer2Detector, ReputationSystem, NonIIDHandler, TwoStageFilter, ModeController, aggregate_by_mode
 
 print("\n" + "="*70)
 print("QUICK PIPELINE TEST")
