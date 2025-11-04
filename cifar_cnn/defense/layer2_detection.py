@@ -24,8 +24,8 @@ class Layer2Detector:
     """
     
     def __init__(self, 
-                 distance_multiplier: float = 1.5,
-                 cosine_threshold: float = 0.3,
+                 distance_multiplier: float = 2.5,
+                 cosine_threshold: float = 0.2,
                  warmup_rounds: int = 15):
         """
         Args:

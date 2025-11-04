@@ -26,8 +26,8 @@ class TwoStageFilter:
     def __init__(self,
                  hard_threshold_base: float = 0.85,
                  soft_threshold_base: float = 0.5,
-                 rep_threshold_normal: float = 0.2,
-                 rep_threshold_alert: float = 0.4,
+                 rep_threshold_normal: float = 0.3,
+                 rep_threshold_alert: float = 0.5,
                  rep_threshold_defense: float = 0.6):
         """
         Args:

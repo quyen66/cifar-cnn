@@ -130,7 +130,7 @@ class Layer1Detector:
         
         # Threshold with adaptive k
         # Warmup: k=6.0 (looser), Normal: k=4.0 (stricter)
-        k = 6.0 if is_warmup else 4.0
+        k = 6.0 if is_warmup else 5.0
         threshold = median_norm + k * mad
         
         # Flag outliers
