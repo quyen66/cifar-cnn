@@ -18,6 +18,7 @@ Usage:
 
 import json
 import subprocess
+from subprocess import Popen, PIPE
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -44,7 +45,7 @@ class ParamTestRunner:
         
         # Test configuration
         self.num_clients = 40
-        self.num_rounds = 30  # Giảm từ 50 → 30 để chạy nhanh hơn
+        self.num_rounds = 30  # Reduced from 30 for faster testing
         
         # Attack scenario (FIXED để focus vào param tuning)
         self.attack_type = "byzantine"
@@ -144,31 +145,66 @@ class ParamTestRunner:
         # Execute
         start_time = time.time()
         
+        print(f"⏳ Starting test...")
+        print(f"   Command: flwr run . --run-config '{run_config[:100]}...'")
+        print(f"\n{'='*70}")
+        print("TEST OUTPUT (REAL-TIME):")
+        print(f"{'='*70}\n")
+        
+        # Create output log file
+        import os
+        os.makedirs('test_logs', exist_ok=True)
+        log_file = f"test_logs/test_{layer}_{config_idx}.log"
+        
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600  # 10 minutes timeout
-            )
+            # Run WITHOUT capturing - output goes directly to terminal
+            # But also save to file using tee-like approach
+            with open(log_file, 'w') as f:
+                # Use shell=False but redirect
+                process = Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,  # Merge stderr to stdout
+                    text=True,
+                    bufsize=0  # Unbuffered
+                )
+                
+                # Read and display + save simultaneously
+                output_lines = []
+                for line in iter(process.stdout.readline, ''):
+                    if not line:
+                        break
+                    # Show immediately
+                    print(line, end='', flush=True)
+                    # Save to file
+                    f.write(line)
+                    f.flush()
+                    # Keep for parsing
+                    output_lines.append(line)
+                
+                # Wait for completion
+                process.wait()
             
             elapsed = time.time() - start_time
             
-            if result.returncode == 0:
-                print(f"✅ Test completed in {elapsed:.1f}s")
+            print(f"\n{'='*70}")
+            print(f"⏱️  Completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+            print(f"{'='*70}\n")
+            
+            # Combine output
+            full_output = ''.join(output_lines)
+            
+            if process.returncode == 0:
+                print(f"✅ Test completed successfully")
                 
                 # Parse accuracy từ output
-                accuracy = self._parse_accuracy(result.stdout)
+                accuracy = self._parse_accuracy(full_output)
                 
-                # If accuracy is 0, save output for debugging
+                # If accuracy is 0, save full log
                 if accuracy == 0.0:
-                    debug_file = f"debug_output_{layer}_{config_idx}.txt"
-                    with open(debug_file, 'w') as f:
-                        f.write("=== STDOUT ===\n")
-                        f.write(result.stdout)
-                        f.write("\n\n=== STDERR ===\n")
-                        f.write(result.stderr)
-                    print(f"  ⚠️  Accuracy=0.0, saved output to {debug_file}")
+                    print(f"  ⚠️  Accuracy=0.0, full log saved to: {log_file}")
+                else:
+                    print(f"  ✓ Parsed accuracy: {accuracy:.3f}")
                 
                 return {
                     'layer': layer,
@@ -177,39 +213,34 @@ class ParamTestRunner:
                     'success': True,
                     'accuracy': accuracy,
                     'elapsed_time': elapsed,
+                    'log_file': log_file,
                     'timestamp': datetime.now().isoformat()
                 }
             else:
-                print(f"❌ Test failed: {result.stderr[:200]}")
+                print(f"❌ Test failed with return code: {process.returncode}")
+                print(f"   Full log: {log_file}")
+                
                 return {
                     'layer': layer,
                     'config_idx': config_idx,
                     'config': config,
                     'success': False,
-                    'error': result.stderr[:500],
+                    'error': f'Process failed with code {process.returncode}',
                     'elapsed_time': elapsed,
+                    'log_file': log_file,
                     'timestamp': datetime.now().isoformat()
                 }
         
-        except subprocess.TimeoutExpired:
-            print(f"⏱️  Test timeout after 10 minutes")
-            return {
-                'layer': layer,
-                'config_idx': config_idx,
-                'config': config,
-                'success': False,
-                'error': 'Timeout',
-                'timestamp': datetime.now().isoformat()
-            }
-        
         except Exception as e:
-            print(f"💥 Exception: {str(e)}")
+            elapsed = time.time() - start_time
+            print(f"\n💥 Exception: {str(e)}")
             return {
                 'layer': layer,
                 'config_idx': config_idx,
                 'config': config,
                 'success': False,
                 'error': str(e),
+                'elapsed_time': elapsed,
                 'timestamp': datetime.now().isoformat()
             }
     
