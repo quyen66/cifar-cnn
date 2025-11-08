@@ -21,7 +21,7 @@ from flwr.server.strategy import FedProx
 from flwr.common.context import Context
 
 from cifar_cnn.task import get_model, get_parameters, set_parameters
-#from cifar_cnn.utils import ModelManager
+from cifar_cnn.model_manager import ModelManager
 
 # Import ALL defense components
 from cifar_cnn.defense import (
