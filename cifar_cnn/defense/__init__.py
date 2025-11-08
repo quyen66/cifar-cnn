@@ -1,8 +1,14 @@
+"""
+Defense Package
+===============
+Full defense pipeline với configurable parameters.
+"""
+
 from .layer1_dbscan import Layer1Detector
 from .layer2_detection import Layer2Detector
-from .reputation import ReputationSystem
 from .noniid_handler import NonIIDHandler
 from .filtering import TwoStageFilter
+from .reputation import ReputationSystem
 from .mode_controller import ModeController
 from .aggregation import (
     weighted_average_aggregation,
@@ -14,9 +20,9 @@ from .aggregation import (
 __all__ = [
     'Layer1Detector',
     'Layer2Detector',
-    'ReputationSystem',
     'NonIIDHandler',
     'TwoStageFilter',
+    'ReputationSystem',
     'ModeController',
     'weighted_average_aggregation',
     'trimmed_mean_aggregation',

@@ -1,72 +1,62 @@
 """
-Reputation System - Asymmetric EMA
-===================================
-Hệ thống danh tiếng đánh giá độ tin cậy của client theo thời gian.
+Reputation System
+==================
+Asymmetric EMA updates với floor lifting.
 
-Components:
-- Consistency Score (Immediate + History)
-- Participation Score (Cosine Similarity)
-- Asymmetric EMA Update (Penalize Fast, Reward Slow)
-- Floor Lifting Mechanism
-
-Author: Week 3 Implementation
+ALL PARAMETERS ARE CONFIGURABLE VIA CONSTRUCTOR (loaded from pyproject.toml)
 """
-
 import numpy as np
-from typing import Dict, List, Optional
-from collections import deque
+from typing import Dict, List, Optional, Tuple, Set
+
 
 
 class ReputationSystem:
-    """
-    Hệ thống danh tiếng bất đối xứng với floor lifting.
-    
-    Triết lý:
-    - Trừng phạt nhanh (α_down = 0.8) khi hành vi xấu
-    - Thưởng chậm (α_up = 0.3) khi hành vi tốt
-    - Cơ hội thứ hai cho client bị đánh giá sai (floor lifting)
-    """
+    """Reputation system với configurable parameters."""
     
     def __init__(self,
-                 alpha_down: float = 0.8,
-                 alpha_up: float = 0.3,
-                 floor_threshold: float = 0.15,
-                 floor_target: float = 0.3,
-                 floor_patience: int = 5,
-                 history_window: int = 5):
+                 ema_alpha_increase: float = 0.4,
+                 ema_alpha_decrease: float = 0.2,
+                 penalty_flagged: float = 0.2,
+                 penalty_variance: float = 0.1,
+                 reward_clean: float = 0.1,
+                 floor_lift_threshold: float = 0.4,
+                 floor_lift_amount: float = 0.2,
+                 initial_reputation: float = 0.8):
         """
+        Initialize Reputation System with configurable parameters.
+        
         Args:
-            alpha_down: EMA rate khi giảm danh tiếng (default=0.8, nhanh)
-            alpha_up: EMA rate khi tăng danh tiếng (default=0.3, chậm)
-            floor_threshold: Ngưỡng để trigger floor lifting (default=0.15)
-            floor_target: Target reputation khi lift (default=0.3)
-            floor_patience: Số rounds good behavior để lift (default=5)
-            history_window: Số rounds lưu lịch sử (default=5)
+            ema_alpha_increase: EMA alpha for reputation increase (clean behavior)
+            ema_alpha_decrease: EMA alpha for reputation decrease (malicious behavior)
+            penalty_flagged: Penalty when client is flagged
+            penalty_variance: Penalty for high gradient variance
+            reward_clean: Reward for clean behavior
+            floor_lift_threshold: Threshold to trigger floor lifting
+            floor_lift_amount: Amount to lift floor
+            initial_reputation: Initial reputation for new clients
         """
-        self.alpha_down = alpha_down
-        self.alpha_up = alpha_up
-        self.floor_threshold = floor_threshold
-        self.floor_target = floor_target
-        self.floor_patience = floor_patience
-        self.history_window = history_window
+        self.ema_alpha_increase = ema_alpha_increase
+        self.ema_alpha_decrease = ema_alpha_decrease
+        self.penalty_flagged = penalty_flagged
+        self.penalty_variance = penalty_variance
+        self.reward_clean = reward_clean
+        self.floor_lift_threshold = floor_lift_threshold
+        self.floor_lift_amount = floor_lift_amount
+        self.initial_reputation = initial_reputation
         
-        # Storage
-        self.reputations: Dict[int, float] = {}  # client_id -> reputation
-        self.history: Dict[int, deque] = {}  # client_id -> deque of past gradients
-        self.floor_counters: Dict[int, int] = {}  # client_id -> good behavior count
+        # Client reputations
+        self.reputations = {}
         
-        print(f"✅ ReputationSystem initialized:")
-        print(f"   - Alpha down (penalize): {alpha_down}")
-        print(f"   - Alpha up (reward): {alpha_up}")
-        print(f"   - Floor lifting: {floor_threshold} → {floor_target} (patience={floor_patience})")
-        print(f"   - History window: {history_window} rounds")
+        print(f"✅ ReputationSystem initialized with params:")
+        print(f"   EMA alphas: increase={ema_alpha_increase}, decrease={ema_alpha_decrease}")
+        print(f"   Penalties: flagged={penalty_flagged}, variance={penalty_variance}")
+        print(f"   Reward: {reward_clean}")
+        print(f"   Floor lift: threshold={floor_lift_threshold}, amount={floor_lift_amount}")
     
-    def initialize_client(self, client_id: int, initial_reputation: float = 0.8):
-        """Initialize một client mới."""
+    def initialize_client(self, client_id: int):
+        """Initialize reputation for a new client."""
         if client_id not in self.reputations:
-            self.reputations[client_id] = initial_reputation
-            self.history[client_id] = deque(maxlen=self.history_window)
-            self.floor_counters[client_id] = 0
+            self.reputations[client_id] = self.initial_reputation
     
     def update(self,
                client_id: int,
@@ -75,176 +65,74 @@ class ReputationSystem:
                was_flagged: bool,
                current_round: int) -> float:
         """
-        Cập nhật reputation cho một client.
-        
-        Args:
-            client_id: ID của client
-            gradient: Gradient hiện tại
-            grad_median: Gradient median (reference)
-            was_flagged: Client có bị đánh dấu không
-            current_round: Round hiện tại
+        Update reputation using asymmetric EMA.
         
         Returns:
-            Reputation mới
+            Updated reputation
         """
-        # Initialize nếu chưa có
+        # Initialize if needed
         self.initialize_client(client_id)
         
-        # Tính raw reputation score
-        raw_score = self._compute_raw_score(
-            client_id, gradient, grad_median
-        )
+        current_rep = self.reputations[client_id]
         
-        # Update với Asymmetric EMA
-        old_rep = self.reputations[client_id]
-        new_rep = self._asymmetric_ema_update(
-            old_rep, raw_score, was_flagged
-        )
-        
-        # Update storage
-        self.reputations[client_id] = new_rep
-        self.history[client_id].append(gradient.flatten())
-        
-        # Check floor lifting
-        if new_rep <= self.floor_threshold:
-            self._check_floor_lifting(client_id, was_flagged)
+        # Compute penalties/rewards
+        if was_flagged:
+            # Penalty for being flagged
+            delta = -self.penalty_flagged
+            alpha = self.ema_alpha_decrease  # Faster decrease
         else:
-            self.floor_counters[client_id] = 0
+            # Reward for clean behavior
+            delta = self.reward_clean
+            alpha = self.ema_alpha_increase  # Slower increase
+        
+        # Additional penalty for high variance
+        variance_penalty = self._compute_variance_penalty(gradient, grad_median)
+        delta -= variance_penalty
+        
+        # Asymmetric EMA update
+        new_rep = current_rep + alpha * delta
+        
+        # Clip to [0, 1]
+        new_rep = max(0.0, min(1.0, new_rep))
+        
+        # Floor lifting
+        if new_rep < self.floor_lift_threshold:
+            new_rep += self.floor_lift_amount
+            new_rep = min(1.0, new_rep)
+        
+        self.reputations[client_id] = new_rep
         
         return new_rep
     
-    def _compute_raw_score(self,
-                          client_id: int,
-                          gradient: np.ndarray,
-                          grad_median: np.ndarray) -> float:
-        """
-        Tính raw reputation score dựa trên Consistency và Participation.
+    def _compute_variance_penalty(self,
+                                  gradient: np.ndarray,
+                                  grad_median: np.ndarray) -> float:
+        """Compute variance-based penalty."""
+        # Compute distance to median
+        dist = np.linalg.norm(gradient.flatten() - grad_median)
+        median_norm = np.linalg.norm(grad_median)
         
-        Formula (theo main.pdf):
-            r(i,t) = 0.5 × C(i,t) + 0.5 × P(i,t)
+        # Normalized distance
+        normalized_dist = dist / (median_norm + 1e-10)
         
-        C(i,t) = Consistency = 0.5 × (0.6 × C_immediate + 0.4 × C_history + 1)
-        P(i,t) = Participation = 0.5 × (cosine_sim + 1)
+        # Penalty proportional to distance
+        penalty = min(self.penalty_variance, normalized_dist * self.penalty_variance)
         
-        FIX: Better handling of history to differentiate mixed behavior
-        """
-        g_flat = gradient.flatten()
-        
-        # === Participation Score (Cosine Similarity) ===
-        cosine_sim = np.dot(g_flat, grad_median) / (
-            np.linalg.norm(g_flat) * np.linalg.norm(grad_median) + 1e-10
-        )
-        participation = 0.5 * (cosine_sim + 1)  # Scale to [0, 1]
-        
-        # === Consistency Score ===
-        # Immediate consistency (với gradient hiện tại)
-        c_immediate = cosine_sim  # Reuse cosine similarity
-        
-        # Historical consistency (với past gradients)
-        c_history = 0.0
-        if len(self.history[client_id]) > 0:
-            # FIX: Tính avg cosine sim với past gradients
-            # Và penalty nếu variance cao (inconsistent)
-            past_sims = []
-            for past_grad in self.history[client_id]:
-                sim = np.dot(g_flat, past_grad) / (
-                    np.linalg.norm(g_flat) * np.linalg.norm(past_grad) + 1e-10
-                )
-                past_sims.append(sim)
-            
-            # Mean similarity
-            mean_sim = np.mean(past_sims)
-            
-            # Variance penalty (high variance = inconsistent)
-            # FINAL FIX: Reduce max penalty from 0.3 to 0.2
-            var_sim = np.var(past_sims)
-            variance_penalty = np.clip(var_sim, 0, 0.2)  # Was 0.3, now 0.2
-            
-            c_history = mean_sim - variance_penalty
-        
-        # Combine consistency
-        # FIX: Increase history weight to better track behavior
-        consistency = 0.5 * (0.5 * c_immediate + 0.5 * c_history + 1)
-        
-        # === Final Raw Score ===
-        raw_score = 0.5 * consistency + 0.5 * participation
-        
-        return np.clip(raw_score, 0.0, 1.0)
-    
-    def _asymmetric_ema_update(self,
-                               old_rep: float,
-                               raw_score: float,
-                               was_flagged: bool) -> float:
-        """
-        Asymmetric EMA update.
-        
-        Formula (main.pdf):
-            R(i,t) = (1-α) × R(i,t-1) + α × r(i,t)
-        
-        Với:
-            α = α_down (0.8) nếu giảm
-            α = α_up (0.3) nếu tăng
-        
-        FIX FINAL: Reduce penalty even more for mixed behavior
-            Nếu was_flagged: raw_score × 0.8 (was 0.7, now 0.8)
-        """
-        # FINAL FIX: Even less harsh penalty for mixed clients
-        if was_flagged:
-            raw_score = raw_score * 0.8  # Changed from 0.7 to 0.8
-        
-        # Asymmetric alpha
-        if raw_score < old_rep:
-            # Giảm nhanh
-            alpha = self.alpha_down
-        else:
-            # Tăng chậm
-            alpha = self.alpha_up
-        
-        # EMA update
-        new_rep = (1 - alpha) * old_rep + alpha * raw_score
-        
-        return np.clip(new_rep, 0.0, 1.0)
-    
-    def _check_floor_lifting(self, client_id: int, was_flagged: bool):
-        """
-        Cơ chế floor lifting - cho cơ hội thứ hai.
-        
-        Logic:
-        - Nếu reputation ≤ floor_threshold trong patience rounds
-        - VÀ hành vi tốt (không bị flag)
-        - THÌ nâng lên floor_target
-        """
-        if not was_flagged:
-            # Good behavior
-            self.floor_counters[client_id] += 1
-            
-            if self.floor_counters[client_id] >= self.floor_patience:
-                # Lift floor!
-                old_rep = self.reputations[client_id]
-                self.reputations[client_id] = self.floor_target
-                self.floor_counters[client_id] = 0
-                
-                print(f"   🔼 Floor Lifting: Client {client_id} "
-                      f"{old_rep:.3f} → {self.floor_target:.3f} "
-                      f"(after {self.floor_patience} good rounds)")
-        else:
-            # Bad behavior - reset counter
-            self.floor_counters[client_id] = 0
+        return penalty
     
     def get_reputation(self, client_id: int) -> float:
-        """Lấy reputation hiện tại."""
-        if client_id not in self.reputations:
-            self.initialize_client(client_id)
-        return self.reputations[client_id]
-    
-    def get_all_reputations(self) -> Dict[int, float]:
-        """Lấy tất cả reputations."""
-        return self.reputations.copy()
+        """Get reputation for a client."""
+        return self.reputations.get(client_id, self.initial_reputation)
     
     def get_stats(self) -> Dict:
-        """Get statistics."""
+        """Get reputation statistics."""
         if not self.reputations:
-            return {}
+            return {
+                'num_clients': 0,
+                'mean_reputation': 0.0,
+                'min_reputation': 0.0,
+                'max_reputation': 0.0
+            }
         
         reps = list(self.reputations.values())
         return {
@@ -252,5 +140,6 @@ class ReputationSystem:
             'mean_reputation': np.mean(reps),
             'min_reputation': np.min(reps),
             'max_reputation': np.max(reps),
-            'below_floor': sum(1 for r in reps if r <= self.floor_threshold)
+            'ema_alpha_increase': self.ema_alpha_increase,
+            'ema_alpha_decrease': self.ema_alpha_decrease
         }

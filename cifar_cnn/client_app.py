@@ -103,7 +103,7 @@ def client_fn(context: Context) -> Client:
     partition_type = context.run_config.get("partition-type", "iid")
     
     # FedProx parameter
-    proximal_mu = context.run_config.get("proximal-mu", 0.01)
+    proximal_mu = context.run_config.get("proximal-mu", 0.005)
     
     # GPU optimization
     num_workers = context.run_config.get("num-workers", 0)  # 0 for GPU (faster)

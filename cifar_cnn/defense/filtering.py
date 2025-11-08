@@ -1,13 +1,9 @@
 """
-Two-Stage Filtering - Week 3
-=============================
-Lọc clients bằng 2 giai đoạn: Hard filtering và Soft filtering.
+Two-Stage Filtering
+====================
+Hard filtering + Soft filtering với reputation scores.
 
-Components:
-1. Hard Filtering: Loại bỏ ngay clients có confidence score cực cao
-2. Soft Filtering: Loại bỏ thêm clients có confidence cao + reputation thấp
-
-Author: Week 3 Implementation
+ALL PARAMETERS ARE CONFIGURABLE VIA CONSTRUCTOR (loaded from pyproject.toml)
 """
 
 import numpy as np
@@ -15,146 +11,114 @@ from typing import Dict, List, Tuple, Set
 
 
 class TwoStageFilter:
-    """
-    Two-Stage Filtering với adaptive thresholds.
-    
-    Philosophy:
-    - Stage 1 (Hard): Loại bỏ ngay threats rõ ràng
-    - Stage 2 (Soft): Loại bỏ thêm suspicious clients dựa trên reputation
-    """
+    """Two-stage filter với configurable parameters."""
     
     def __init__(self,
-                 hard_threshold_base: float = 0.85,
-                 soft_threshold_base: float = 0.5,
-                 rep_threshold_normal: float = 0.3,
-                 rep_threshold_alert: float = 0.5,
-                 rep_threshold_defense: float = 0.6):
+                 hard_k_threshold: int = 3,
+                 soft_reputation_threshold: float = 0.4,
+                 soft_distance_multiplier: float = 2.0,
+                 soft_enabled: bool = True):
         """
+        Initialize Two-Stage Filter with configurable parameters.
+        
         Args:
-            hard_threshold_base: Ngưỡng cơ bản cho hard filtering (default=0.85)
-            soft_threshold_base: Ngưỡng cơ bản cho soft filtering (default=0.5)
-            rep_threshold_normal: Reputation threshold ở mode NORMAL (default=0.2)
-            rep_threshold_alert: Reputation threshold ở mode ALERT (default=0.4)
-            rep_threshold_defense: Reputation threshold ở mode DEFENSE (default=0.6)
+            hard_k_threshold: K threshold for hard filtering
+            soft_reputation_threshold: Reputation threshold for soft filtering
+            soft_distance_multiplier: Distance multiplier for soft filtering
+            soft_enabled: Enable/disable soft filtering
         """
-        self.hard_threshold_base = hard_threshold_base
-        self.soft_threshold_base = soft_threshold_base
+        self.hard_k_threshold = hard_k_threshold
+        self.soft_reputation_threshold = soft_reputation_threshold
+        self.soft_distance_multiplier = soft_distance_multiplier
+        self.soft_enabled = soft_enabled
         
-        self.rep_thresholds = {
-            'NORMAL': rep_threshold_normal,
-            'ALERT': rep_threshold_alert,
-            'DEFENSE': rep_threshold_defense
-        }
-        
-        print(f"✅ TwoStageFilter initialized:")
-        print(f"   - Hard threshold: {hard_threshold_base}")
-        print(f"   - Soft threshold: {soft_threshold_base}")
-        print(f"   - Rep thresholds: N={rep_threshold_normal}, A={rep_threshold_alert}, D={rep_threshold_defense}")
+        print(f"✅ TwoStageFilter initialized with params:")
+        print(f"   Hard k-threshold: {hard_k_threshold}")
+        print(f"   Soft rep-threshold: {soft_reputation_threshold}")
+        print(f"   Soft distance-mult: {soft_distance_multiplier}")
+        print(f"   Soft enabled: {soft_enabled}")
     
     def filter_clients(self,
                       client_ids: List[int],
                       confidence_scores: Dict[int, float],
                       reputations: Dict[int, float],
-                      mode: str = 'NORMAL',
-                      heterogeneity: float = 0.5) -> Tuple[Set[int], Set[int], Dict]:
+                      mode: str,
+                      heterogeneity: float) -> Tuple[Set[int], Set[int], Dict]:
         """
-        Lọc clients qua 2 giai đoạn.
-        
-        Args:
-            client_ids: List of client IDs
-            confidence_scores: Dict mapping client_id -> confidence score [0,1]
-            reputations: Dict mapping client_id -> reputation score [0,1]
-            mode: Current mode ('NORMAL', 'ALERT', 'DEFENSE')
-            heterogeneity: Heterogeneity score [0,1] để điều chỉnh threshold
+        Filter clients using two-stage approach.
         
         Returns:
-            trusted_clients: Set of client IDs that passed both stages
-            filtered_clients: Set of client IDs that were filtered
-            filter_stats: Dictionary with filtering statistics
+            (trusted_clients, filtered_clients, stats)
         """
-        # Adjust thresholds based on heterogeneity
-        hard_threshold = self._adjust_threshold(
-            self.hard_threshold_base, 
-            heterogeneity,
-            increase=True  # Tăng threshold khi Non-IID cao
+        # Stage 1: Hard filtering
+        trusted_stage1, filtered_stage1 = self._hard_filtering(
+            client_ids, confidence_scores
         )
         
-        soft_threshold = self._adjust_threshold(
-            self.soft_threshold_base,
-            heterogeneity,
-            increase=True
-        )
+        # Stage 2: Soft filtering (if enabled)
+        if self.soft_enabled and mode in ['ALERT', 'DEFENSE']:
+            trusted_stage2, filtered_stage2 = self._soft_filtering(
+                trusted_stage1, reputations, heterogeneity
+            )
+        else:
+            trusted_stage2 = trusted_stage1
+            filtered_stage2 = set()
         
-        # Get reputation threshold cho mode hiện tại
-        rep_threshold = self.rep_thresholds.get(mode, 0.4)
+        # Combine
+        trusted = trusted_stage2
+        filtered = filtered_stage1 | filtered_stage2
         
-        # Stage 1: Hard Filtering
-        hard_filtered = set()
-        for cid in client_ids:
-            conf = confidence_scores.get(cid, 0.0)
-            if conf > hard_threshold:
-                hard_filtered.add(cid)
-        
-        # Remaining clients after stage 1
-        remaining = set(client_ids) - hard_filtered
-        
-        # Stage 2: Soft Filtering (reputation-based)
-        soft_filtered = set()
-        for cid in remaining:
-            conf = confidence_scores.get(cid, 0.0)
-            rep = reputations.get(cid, 0.8)  # Default high rep if missing
-            
-            # Filter nếu: confidence cao VÀ reputation thấp
-            if conf > soft_threshold and rep < rep_threshold:
-                soft_filtered.add(cid)
-        
-        # Final trusted clients
-        trusted = remaining - soft_filtered
-        filtered = hard_filtered | soft_filtered
-        
-        # Statistics
         stats = {
-            'total_clients': len(client_ids),
-            'hard_filtered': len(hard_filtered),
-            'soft_filtered': len(soft_filtered),
+            'hard_filtered': len(filtered_stage1),
+            'soft_filtered': len(filtered_stage2),
             'total_filtered': len(filtered),
-            'trusted': len(trusted),
-            'hard_threshold': hard_threshold,
-            'soft_threshold': soft_threshold,
-            'rep_threshold': rep_threshold,
-            'mode': mode
+            'trusted': len(trusted)
         }
         
         return trusted, filtered, stats
     
-    def _adjust_threshold(self,
-                         base: float,
-                         heterogeneity: float,
-                         increase: bool = True) -> float:
-        """
-        Điều chỉnh threshold dựa trên heterogeneity.
+    def _hard_filtering(self,
+                       client_ids: List[int],
+                       confidence_scores: Dict[int, float]) -> Tuple[Set[int], Set[int]]:
+        """Hard filtering based on confidence scores."""
+        trusted = set()
+        filtered = set()
         
-        Args:
-            base: Base threshold
-            heterogeneity: Heterogeneity score [0,1]
-            increase: True = tăng threshold khi H cao, False = giảm
+        for cid in client_ids:
+            conf = confidence_scores.get(cid, 0.0)
+            
+            # Use configured k threshold
+            if conf >= self.hard_k_threshold:
+                filtered.add(cid)
+            else:
+                trusted.add(cid)
         
-        Returns:
-            Adjusted threshold
-        """
-        adjustment = (heterogeneity - 0.5) * 0.2
+        return trusted, filtered
+    
+    def _soft_filtering(self,
+                       trusted_clients: Set[int],
+                       reputations: Dict[int, float],
+                       heterogeneity: float) -> Tuple[Set[int], Set[int]]:
+        """Soft filtering based on reputation."""
+        trusted = set()
+        filtered = set()
         
-        if increase:
-            adjusted = base + adjustment
-        else:
-            adjusted = base - adjustment
+        for cid in trusted_clients:
+            rep = reputations.get(cid, 0.8)
+            
+            # Use configured reputation threshold
+            if rep < self.soft_reputation_threshold:
+                filtered.add(cid)
+            else:
+                trusted.add(cid)
         
-        return np.clip(adjusted, 0.3, 0.95)
+        return trusted, filtered
     
     def get_stats(self) -> Dict:
-        """Get filter configuration."""
+        """Get filter statistics."""
         return {
-            'hard_threshold_base': self.hard_threshold_base,
-            'soft_threshold_base': self.soft_threshold_base,
-            'rep_thresholds': self.rep_thresholds
+            'hard_k_threshold': self.hard_k_threshold,
+            'soft_reputation_threshold': self.soft_reputation_threshold,
+            'soft_distance_multiplier': self.soft_distance_multiplier,
+            'soft_enabled': self.soft_enabled
         }

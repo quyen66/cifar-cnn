@@ -1,6 +1,5 @@
 # =====================================================================
-# For a full TOML configuration guide, check the Flower docs:
-# https://flower.ai/docs/framework/how-to-configure-pyproject-toml.html
+# Full Configuration với Defense Parameters
 # =====================================================================
 
 [build-system]
@@ -10,9 +9,8 @@ build-backend = "hatchling.build"
 [project]
 name = "cifar-cnn"
 version = "1.0.0"
-description = ""
+description = "Federated Learning với Hybrid Adaptive Defense System"
 license = "Apache-2.0"
-# Dependencies for your Flower App
 dependencies = [
     "flwr[simulation]>=1.22.0",
     "flwr-datasets[vision]>=0.5.0",
@@ -26,68 +24,173 @@ packages = ["."]
 [tool.flwr.app]
 publisher = "quyen"
 
-# Point to your ServerApp and ClientApp objects
 [tool.flwr.app.components]
 serverapp = "cifar_cnn.server_app:app"
 clientapp = "cifar_cnn.client_app:app"
 
-
+# =====================================================================
+# FEDERATED LEARNING CONFIGURATION
+# =====================================================================
 [tool.flwr.app.config]
-# Federated Learning 
+
+# ----- Basic FL Settings -----
 num-clients = 40
 num-server-rounds = 50
-fraction-fit = 0.6 # % clients mỗi round
+fraction-fit = 0.6
 fraction-evaluate = 0.2
-min-fit-clients = 23 
+min-fit-clients = 23
 min-evaluate-clients = 6
-min-available-clients = 40  # Tối thiểu 10 clients online
+min-available-clients = 40
 
-# Training settings
+# ----- Training Settings -----
 local-epochs = 3
-batch-size = 896
+batch-size = 512
 learning-rate = 0.001
 
-# FedProx parameter
-proximal-mu = 0.01  #proximal term (0.01 - 1.0)
+# ----- FedProx Parameter -----
+proximal-mu = 0.01
 
-# Data partition
+# ----- Data Partition -----
 partition-type = "iid"
 
-# GPU optimization
+# ----- GPU Optimization -----
 use-mixed-precision = true
 num-workers = 0
 pin-memory = true
 
-# Attack Configuration
-attack-type = "none"  # Options: "none", "label_flip", "byzantine", "gaussian"
-attack-ratio = 0.0    # 0.1 = 10%, 0.2 = 20%, 0.3 = 30%
+# ----- Attack Configuration -----
+attack-type = "none"
+attack-ratio = 0.0
 
-# Label Flipping parameters
+# Label Flipping
 flip-probability = 1.0
-flip-type = "reverse"  # "reverse" or "random"
+flip-type = "reverse"
 
-# Byzantine parameters
-byzantine-type = "sign_flip"  # "random", "sign_flip", "scaled"
+# Byzantine
+byzantine-type = "sign_flip"
 byzantine-scale = 2.0
 
-# Gaussian Noise parameters
-noise-std = 0.1  # 0.01 = mild, 0.1 = medium, 1.0 = strong
+# Gaussian Noise
+noise-std = 0.1
 
-# Auto-save settings
+# ----- Model Saving -----
 auto-save = true
 save-dir = "saved_models"
 save-interval = 10
+resume-from = ""
 
-# Resume training
-resume-from = ""  # Tên folder model hoặc "" để train từ đầu
-
-# Detection settings 
+# ----- Defense System -----
 enable-defense = true
 
+# =====================================================================
+# DEFENSE PARAMETERS - LAYER 1: DBSCAN DETECTION
+# =====================================================================
+[tool.flwr.app.config.defense.layer1]
+# PCA Configuration
+pca-dims = 20
+
+# DBSCAN Configuration
+dbscan-min-samples = 3
+dbscan-eps-multiplier = 0.5
+
+# Magnitude Filter (MAD-based)
+mad-k-normal = 4.0
+mad-k-warmup = 6.0
+
+# Voting Mechanism
+voting-threshold-normal = 2
+voting-threshold-warmup = 3
+
+# Warmup Phase
+warmup-rounds = 10
+
+# =====================================================================
+# DEFENSE PARAMETERS - LAYER 2: DISTANCE + DIRECTION DETECTION
+# =====================================================================
+[tool.flwr.app.config.defense.layer2]
+# Distance Check
+distance-multiplier = 1.5
+
+# Direction Check (Cosine Similarity)
+cosine-threshold = 0.3
+
+# Warmup Phase
+warmup-rounds = 15
+
+# =====================================================================
+# DEFENSE PARAMETERS - NON-IID HANDLER
+# =====================================================================
+[tool.flwr.app.config.defense.noniid]
+# Heterogeneity Thresholds
+h-threshold-normal = 0.6
+h-threshold-alert = 0.5
+
+# Adaptive Multiplier
+adaptive-multiplier = 1.5
+
+# Baseline Tracking
+baseline-percentile = 60
+baseline-window-size = 10
+
+# =====================================================================
+# DEFENSE PARAMETERS - TWO-STAGE FILTERING
+# =====================================================================
+[tool.flwr.app.config.defense.filtering]
+# Hard Filtering
+hard-k-threshold = 3
+
+# Soft Filtering
+soft-reputation-threshold = 0.4
+soft-distance-multiplier = 2.0
+soft-enabled = true
+
+# =====================================================================
+# DEFENSE PARAMETERS - REPUTATION SYSTEM
+# =====================================================================
+[tool.flwr.app.config.defense.reputation]
+# EMA (Exponential Moving Average)
+ema-alpha-increase = 0.4
+ema-alpha-decrease = 0.2
+
+# Penalties
+penalty-flagged = 0.2
+penalty-variance = 0.1
+
+# Rewards
+reward-clean = 0.1
+
+# Floor Lifting
+floor-lift-threshold = 0.4
+floor-lift-amount = 0.2
+
+# Initial Reputation
+initial-reputation = 0.8
+
+# =====================================================================
+# DEFENSE PARAMETERS - MODE CONTROLLER
+# =====================================================================
+[tool.flwr.app.config.defense.mode]
+# Mode Thresholds
+threshold-normal-to-alert = 0.20
+threshold-alert-to-defense = 0.30
+
+# Hysteresis
+hysteresis-normal = 0.10
+hysteresis-defense = 0.15
+
+# Reputation Gates
+rep-gate-defense = 0.5
+
+# Initial Mode
+initial-mode = "NORMAL"
+
+# =====================================================================
+# FEDERATION CONFIGURATION
+# =====================================================================
 [tool.flwr.federations]
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 40 # Đây là số Ray actors = số clients
+options.num-supernodes = 40
 options.backend.client-resources.num-cpus = 4
 options.backend.client-resources.num-gpus = 0.05

@@ -8,7 +8,7 @@ Components:
 - Direction Check: Cosine similarity to median
 - Adaptive thresholds based on data distribution
 
-ALL PARAMETERS ARE CONFIGURABLE VIA CONSTRUCTOR (loaded from pyproject.toml)
+Author: Week 3 Implementation
 """
 
 import numpy as np
@@ -19,29 +19,28 @@ class Layer2Detector:
     """
     Layer 2: Deep analysis với Distance + Direction.
     
-    ALL parameters can be configured externally.
+    Phát hiện các cuộc tấn công tinh vi mà Layer 1 bỏ sót,
+    đặc biệt là các tấn công thích ứng (ALIE, Min-Max).
     """
     
     def __init__(self, 
-                 distance_multiplier: float = 1.5,
-                 cosine_threshold: float = 0.3,
+                 distance_multiplier: float = 2.5,
+                 cosine_threshold: float = 0.2,
                  warmup_rounds: int = 15):
         """
-        Initialize Layer 2 Detector with configurable parameters.
-        
         Args:
-            distance_multiplier: Multiplier for distance threshold
-            cosine_threshold: Threshold for cosine similarity
-            warmup_rounds: Number of warmup rounds with looser thresholds
+            distance_multiplier: Multiplier cho ngưỡng khoảng cách (default=1.5)
+            cosine_threshold: Ngưỡng cosine similarity (default=0.3)
+            warmup_rounds: Số rounds warmup với ngưỡng loose hơn (default=15)
         """
         self.distance_multiplier = distance_multiplier
         self.cosine_threshold = cosine_threshold
         self.warmup_rounds = warmup_rounds
         
-        print(f"✅ Layer2Detector initialized with params:")
-        print(f"   Distance multiplier: {distance_multiplier}")
-        print(f"   Cosine threshold: {cosine_threshold}")
-        print(f"   Warmup rounds: {warmup_rounds}")
+        print(f"✅ Layer2Detector initialized:")
+        print(f"   - Distance multiplier: {distance_multiplier}")
+        print(f"   - Cosine threshold: {cosine_threshold}")
+        print(f"   - Warmup rounds: {warmup_rounds}")
     
     def detect(self, 
                gradients: List[np.ndarray],
@@ -52,34 +51,49 @@ class Layer2Detector:
         Phát hiện malicious clients bằng Distance + Direction.
         
         Args:
-            gradients: List of gradients
+            gradients: List of gradient arrays
             client_ids: List of client IDs
-            current_round: Current round
-            layer1_flags: Flags from Layer 1 (optional, for reference)
-            
+            current_round: Current training round
+            layer1_flags: Flags from Layer 1 (optional, để skip các client đã bị đánh dấu)
+        
         Returns:
-            Dictionary mapping client_id -> is_malicious
+            Dictionary mapping client_id -> is_malicious (True/False)
         """
         n = len(gradients)
         
-        if n == 0:
-            return {}
+        # Skip nếu quá ít clients
+        if n < 3:
+            print("   ⚠️  [Layer 2] Too few clients, skipping")
+            return {client_ids[i]: False for i in range(n)}
         
-        # Determine if in warmup
+        # Determine warmup mode
         is_warmup = current_round <= self.warmup_rounds
         
-        # Compute gradient median
+        # Tính gradient median (reference point)
         grad_matrix = np.vstack([g.flatten() for g in gradients])
         grad_median = np.median(grad_matrix, axis=0)
         
-        # Distance check
-        distance_flags = self._distance_check(gradients, grad_median, is_warmup)
+        # Distance Check
+        distance_flags = self._distance_check(
+            gradients, grad_median, is_warmup=is_warmup
+        )
         
-        # Direction check
-        direction_flags = self._direction_check(gradients, grad_median, is_warmup)
+        # Direction Check
+        direction_flags = self._direction_check(
+            gradients, grad_median, is_warmup=is_warmup
+        )
         
-        # Combine: flag if EITHER check triggers
-        layer2_flags = [distance_flags[i] or direction_flags[i] for i in range(n)]
+        # Combine: Flag nếu vi phạm ít nhất 1 trong 2
+        layer2_flags = []
+        for i in range(n):
+            # Nếu Layer 1 đã flag, không cần check lại
+            if layer1_flags and layer1_flags.get(client_ids[i], False):
+                layer2_flags.append(False)  # Layer 2 không flag nữa
+                continue
+            
+            # Flag nếu distance HOẶC direction đáng ngờ
+            flag = distance_flags[i] or direction_flags[i]
+            layer2_flags.append(flag)
         
         # Map to client IDs
         detection_results = {
@@ -87,35 +101,46 @@ class Layer2Detector:
             for i in range(n)
         }
         
-        # Log detection results
+        # Log
         num_detected = sum(layer2_flags)
         if num_detected > 0:
             detected_ids = [client_ids[i] for i in range(n) if layer2_flags[i]]
-            print(f"🔍 Layer 2 detected {num_detected}/{n} additional clients: {detected_ids}")
+            print(f"   🔍 Layer 2 detected {num_detected}/{n} suspicious clients: {detected_ids}")
+            
+            # Breakdown
+            num_distance = sum(distance_flags)
+            num_direction = sum(direction_flags)
+            print(f"      Distance violations: {num_distance}")
+            print(f"      Direction violations: {num_direction}")
         
         return detection_results
     
-    def _distance_check(self,
+    def _distance_check(self, 
                        gradients: List[np.ndarray],
                        grad_median: np.ndarray,
                        is_warmup: bool) -> List[bool]:
         """
         Distance Check: Euclidean distance to median.
         
-        Uses configurable distance multiplier from constructor.
+        Formula:
+            ||g_i - g_median|| > threshold
+            threshold = distance_multiplier × median(||g_j - g_median||)
+        
+        Returns:
+            List of boolean flags
         """
         n = len(gradients)
         
-        # Compute distances to median
+        # Tính khoảng cách tới median
         distances = np.array([
             np.linalg.norm(g.flatten() - grad_median) 
             for g in gradients
         ])
         
-        # Adaptive threshold
+        # Tính ngưỡng adaptive
         median_dist = np.median(distances)
         
-        # Use configured multiplier (warmup: looser)
+        # Warmup: loose hơn (2.0×), Normal: strict hơn (1.5×)
         multiplier = 2.0 if is_warmup else self.distance_multiplier
         threshold = multiplier * median_dist
         
@@ -131,16 +156,24 @@ class Layer2Detector:
         """
         Direction Check: Cosine similarity to median.
         
-        Uses configurable cosine threshold from constructor with adaptive percentile.
+        Formula:
+            cosine_sim(g_i, g_median) < threshold
+        
+        Cosine similarity = 1 (cùng hướng) → 0 (vuông góc) → -1 (ngược hướng)
+        
+        FIX: Use adaptive threshold based on distribution
+        
+        Returns:
+            List of boolean flags
         """
         n = len(gradients)
         
-        # Compute cosine similarities
+        # Tính cosine similarity
         similarities = []
         for g in gradients:
             g_flat = g.flatten()
             
-            # Cosine similarity
+            # Cosine similarity = dot product / (norm × norm)
             sim = np.dot(g_flat, grad_median) / (
                 np.linalg.norm(g_flat) * np.linalg.norm(grad_median) + 1e-10
             )
@@ -148,7 +181,8 @@ class Layer2Detector:
         
         similarities = np.array(similarities)
         
-        # Adaptive threshold based on distribution
+        # FIX: Adaptive threshold based on distribution
+        # Use percentile instead of fixed threshold
         if is_warmup:
             # Warmup: only flag extreme outliers (bottom 5%)
             threshold = np.percentile(similarities, 5)
@@ -159,7 +193,7 @@ class Layer2Detector:
             # Use whichever is stricter
             threshold = min(percentile_threshold, absolute_threshold)
         
-        # Flag if similarity < threshold
+        # Flag nếu similarity < threshold (hướng quá khác)
         flags = [sim < threshold for sim in similarities]
         
         return flags
