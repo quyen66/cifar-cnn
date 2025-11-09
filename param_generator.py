@@ -1,398 +1,248 @@
+#!/usr/bin/env python3
 """
-Defense Parameter Generator
-============================
+Generate Relaxed Parameter Suite
+=================================
 
-Tự động generate các combinations của parameters cho TẤT CẢ defense layers:
-- Layer 1: DBSCAN Detection
-- Layer 2: Distance + Direction Detection  
-- Non-IID Handler
-- Two-Stage Filtering
-- Reputation System
-- Mode Controller
+Creates new param suite with MORE LENIENT ranges based on Phase 1 analysis.
 
-Output: JSON file với tất cả param combinations để test
+Usage:
+    python generate_relaxed_suite.py --mode sampled  # ~300 configs
+    python generate_relaxed_suite.py --mode full     # ~2500 configs
 """
 
 import json
 import itertools
-from typing import Dict, List
+import random
 from datetime import datetime
 from pathlib import Path
+import argparse
 
 
-class DefenseParamGenerator:
-    """Generate parameter combinations cho defense system."""
+# ============================================================================
+# RELAXED PARAMETER RANGES
+# ============================================================================
+
+LAYER1_PARAMS = {
+    'pca_dims': [20],
+    'dbscan_min_samples': [3, 4, 5],
+    'dbscan_eps_multiplier': [0.6, 0.8, 1.0],
+    'mad_k_normal': [5.0, 6.0, 7.0],
+    'mad_k_warmup': [8.0, 9.0, 10.0],
+    'voting_threshold_normal': [2, 3, 4],
+    'voting_threshold_warmup': [3, 4, 5],
+    'warmup_rounds': [15, 20],
+}
+
+LAYER2_PARAMS = {
+    'distance_multiplier': [2.5, 3.0, 3.5],
+    'cosine_threshold': [0.1, 0.2, 0.3],
+    'warmup_rounds': [20, 25, 30],
+}
+
+NONIID_PARAMS = {
+    'h_threshold_normal': [0.6, 0.7, 0.8],
+    'h_threshold_alert': [0.5, 0.6, 0.7],
+    'adaptive_multiplier': [1.2, 1.3, 1.4],
+    'baseline_percentile': [75, 80, 85],
+}
+
+FILTERING_PARAMS = {
+    'hard_k_threshold': [4, 5, 6],
+    'soft_reputation_threshold': [0.2, 0.3, 0.4],
+    'soft_distance_multiplier': [3.0, 3.5, 4.0],
+}
+
+REPUTATION_PARAMS = {
+    'ema_alpha_increase': [0.2, 0.3, 0.4],
+    'ema_alpha_decrease': [0.05, 0.1, 0.15],
+    'penalty_flagged': [0.05, 0.1, 0.15],
+    'penalty_variance': [0.02, 0.05, 0.08],
+    'reward_clean': [0.15, 0.2, 0.25],
+    'floor_lift_threshold': [0.2, 0.3, 0.4],
+}
+
+MODE_PARAMS = {
+    'threshold_normal_to_alert': [0.25, 0.3, 0.35],
+    'threshold_alert_to_defense': [0.35, 0.4, 0.45],
+    'hysteresis_normal': [0.15, 0.2, 0.25],
+    'hysteresis_defense': [0.2, 0.25, 0.3],
+    'rep_gate_defense': [0.3, 0.4, 0.5],
+}
+
+
+# ============================================================================
+# GENERATION FUNCTIONS
+# ============================================================================
+
+def generate_all_combinations(params):
+    """Generate all combinations for a param dict."""
+    keys = list(params.keys())
+    values = [params[k] for k in keys]
     
-    def __init__(self):
-        """Initialize param grids cho tất cả layers."""
-        
-        # ===== LAYER 1: DBSCAN Detection =====
-        self.layer1_grid = {
-            'pca_dims': [20],  # Fixed
-            'dbscan_min_samples': [2, 3, 4],
-            'dbscan_eps_multiplier': [0.4, 0.5, 0.6],
-            'mad_k_normal': [3.0, 4.0, 5.0],
-            'mad_k_warmup': [5.0, 6.0, 7.0],
-            'voting_threshold_normal': [1, 2],
-            'voting_threshold_warmup': [2, 3],
-            'warmup_rounds': [10, 15]
-        }
-        
-        # ===== LAYER 2: Distance + Direction =====
-        self.layer2_grid = {
-            'distance_multiplier': [1.2, 1.5, 1.8, 2.0],
-            'cosine_threshold': [0.2, 0.3, 0.4],
-            'warmup_rounds': [10, 15, 20]
-        }
-        
-        # ===== NON-IID HANDLER =====
-        self.noniid_grid = {
-            'h_threshold_normal': [0.5, 0.6, 0.7],
-            'h_threshold_alert': [0.4, 0.5, 0.6],
-            'adaptive_multiplier': [1.2, 1.5, 1.8],
-            'baseline_percentile': [50, 60, 70]
-        }
-        
-        # ===== TWO-STAGE FILTERING =====
-        self.filtering_grid = {
-            'hard_k_threshold': [2, 3, 4],
-            'soft_reputation_threshold': [0.3, 0.4, 0.5],
-            'soft_distance_multiplier': [1.5, 2.0, 2.5]
-        }
-        
-        # ===== REPUTATION SYSTEM =====
-        self.reputation_grid = {
-            'ema_alpha_increase': [0.3, 0.4, 0.5],
-            'ema_alpha_decrease': [0.1, 0.2, 0.3],
-            'penalty_flagged': [0.1, 0.2, 0.3],
-            'penalty_variance': [0.05, 0.1, 0.15],
-            'reward_clean': [0.05, 0.1, 0.15],
-            'floor_lift_threshold': [0.3, 0.4, 0.5]
-        }
-        
-        # ===== MODE CONTROLLER =====
-        self.mode_grid = {
-            'threshold_normal_to_alert': [0.15, 0.20, 0.25],
-            'threshold_alert_to_defense': [0.25, 0.30, 0.35],
-            'hysteresis_normal': [0.05, 0.10],
-            'hysteresis_defense': [0.10, 0.15],
-            'rep_gate_defense': [0.4, 0.5, 0.6]
-        }
+    configs = []
+    for combination in itertools.product(*values):
+        config = dict(zip(keys, combination))
+        configs.append(config)
     
-    def generate_layer_configs(self, layer: str, max_configs: int = None) -> List[Dict]:
-        """
-        Generate param combinations cho 1 layer cụ thể.
+    return configs
+
+
+def sample_combinations(params, n_samples):
+    """Sample n combinations from param space."""
+    keys = list(params.keys())
+    values = [params[k] for k in keys]
+    
+    # Generate all possible
+    all_configs = []
+    for combination in itertools.product(*values):
+        config = dict(zip(keys, combination))
+        all_configs.append(config)
+    
+    # Sample
+    if n_samples >= len(all_configs):
+        return all_configs
+    
+    random.seed(42)  # Reproducible
+    return random.sample(all_configs, n_samples)
+
+
+def generate_suite(mode='sampled'):
+    """
+    Generate param suite.
+    
+    Args:
+        mode: 'sampled' (~300 configs) or 'full' (~2500 configs)
+    """
+    
+    if mode == 'sampled':
+        # Sample mode - ~300 configs total
+        layer1 = sample_combinations(LAYER1_PARAMS, 80)
+        layer2 = sample_combinations(LAYER2_PARAMS, 20)
+        noniid = sample_combinations(NONIID_PARAMS, 40)
+        filtering = sample_combinations(FILTERING_PARAMS, 20)
+        reputation = sample_combinations(REPUTATION_PARAMS, 80)
+        mode_configs = sample_combinations(MODE_PARAMS, 60)
         
-        Args:
-            layer: 'layer1', 'layer2', 'noniid', 'filtering', 'reputation', 'mode'
-            max_configs: Giới hạn số configs (None = generate ALL)
-        
-        Returns:
-            List of param dicts
-        """
-        grids = {
-            'layer1': self.layer1_grid,
-            'layer2': self.layer2_grid,
-            'noniid': self.noniid_grid,
-            'filtering': self.filtering_grid,
-            'reputation': self.reputation_grid,
-            'mode': self.mode_grid
+    elif mode == 'full':
+        # Full mode - all combinations (~2500 configs)
+        layer1 = generate_all_combinations(LAYER1_PARAMS)
+        layer2 = generate_all_combinations(LAYER2_PARAMS)
+        noniid = generate_all_combinations(NONIID_PARAMS)
+        filtering = generate_all_combinations(FILTERING_PARAMS)
+        reputation = generate_all_combinations(REPUTATION_PARAMS)
+        mode_configs = generate_all_combinations(MODE_PARAMS)
+    
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    
+    suite = {
+        'layer1': layer1,
+        'layer2': layer2,
+        'noniid': noniid,
+        'filtering': filtering,
+        'reputation': reputation,
+        'mode': mode_configs
+    }
+    
+    # Calculate default config (middle values)
+    default_config = {
+        'pca_dims': 20,
+        'dbscan_min_samples': 4,
+        'dbscan_eps_multiplier': 0.8,
+        'mad_k_normal': 6.0,
+        'mad_k_warmup': 9.0,
+        'voting_threshold_normal': 3,
+        'voting_threshold_warmup': 4,
+        'warmup_rounds': 15,
+        'distance_multiplier': 3.0,
+        'cosine_threshold': 0.2,
+        'layer2_warmup_rounds': 25,
+        'h_threshold_normal': 0.7,
+        'h_threshold_alert': 0.6,
+        'adaptive_multiplier': 1.3,
+        'baseline_percentile': 80,
+        'hard_k_threshold': 5,
+        'soft_reputation_threshold': 0.3,
+        'soft_distance_multiplier': 3.5,
+        'ema_alpha_increase': 0.3,
+        'ema_alpha_decrease': 0.1,
+        'penalty_flagged': 0.1,
+        'penalty_variance': 0.05,
+        'reward_clean': 0.2,
+        'floor_lift_threshold': 0.3,
+        'threshold_normal_to_alert': 0.3,
+        'threshold_alert_to_defense': 0.4,
+        'hysteresis_normal': 0.2,
+        'hysteresis_defense': 0.25,
+        'rep_gate_defense': 0.4
+    }
+    
+    # Create output
+    total_configs = sum(len(configs) for configs in suite.values())
+    
+    output = {
+        'generated_at': datetime.now().isoformat(),
+        'mode': mode,
+        'total_configs': total_configs,
+        'default_config': default_config,
+        'suite': suite,
+        'notes': {
+            'philosophy': 'Innocent until proven guilty - MUCH more lenient than original',
+            'changes': 'Based on Phase 1 results showing defense was too aggressive',
+            'expected': 'Lower false positives, higher accuracy, may miss subtle attacks'
         }
-        
-        if layer not in grids:
-            raise ValueError(f"Unknown layer: {layer}")
-        
-        grid = grids[layer]
-        
-        # Generate ALL combinations
-        keys = list(grid.keys())
-        values = [grid[k] for k in keys]
-        
-        all_combos = list(itertools.product(*values))
-        
-        print(f"\n📊 {layer.upper()} - Total combinations: {len(all_combos)}")
-        
-        # Sample only if max_configs is specified AND exceeded
-        if max_configs is not None and len(all_combos) > max_configs:
-            import random
-            random.seed(42)
-            all_combos = random.sample(all_combos, max_configs)
-            print(f"   ⚠️  Sampled: {max_configs} configs (random sampling)")
-        else:
-            print(f"   ✅ Using ALL {len(all_combos)} configs")
-        
-        # Convert to list of dicts
-        configs = []
-        for combo in all_combos:
-            config = {keys[i]: combo[i] for i in range(len(keys))}
-            configs.append(config)
-        
-        return configs
+    }
     
-    def generate_quick_test_suite(self) -> Dict:
-        """
-        Generate quick test suite - vẫn ít hơn comprehensive nhưng KHÔNG sample.
-        
-        Strategy: Test 1 layer tại 1 thời điểm, giữ các layers khác ở default.
-        Generate ALL combinations cho mỗi layer (không giới hạn).
-        
-        Returns:
-            Dict với structure:
-            {
-                'layer1': [config1, config2, ...],
-                'layer2': [...],
-                ...
-            }
-        """
-        print("\n" + "="*70)
-        print("GENERATING QUICK TEST SUITE - ALL COMBINATIONS")
-        print("="*70)
-        print("Strategy: Test each layer independently, NO SAMPLING")
-        
-        suite = {}
-        
-        # Layer 1: ALL configs (không giới hạn)
-        suite['layer1'] = self.generate_layer_configs('layer1', max_configs=None)
-        
-        # Layer 2: ALL configs
-        suite['layer2'] = self.generate_layer_configs('layer2', max_configs=None)
-        
-        # Non-IID: ALL configs
-        suite['noniid'] = self.generate_layer_configs('noniid', max_configs=None)
-        
-        # Filtering: ALL configs
-        suite['filtering'] = self.generate_layer_configs('filtering', max_configs=None)
-        
-        # Reputation: ALL configs
-        suite['reputation'] = self.generate_layer_configs('reputation', max_configs=None)
-        
-        # Mode: ALL configs
-        suite['mode'] = self.generate_layer_configs('mode', max_configs=None)
-        
-        total = sum(len(v) for v in suite.values())
-        print(f"\n✅ Total configs to test: {total}")
-        print("   (ALL possible combinations, NO sampling)")
-        print("="*70)
-        
-        return suite
-    
-    def generate_comprehensive_suite(self) -> Dict:
-        """
-        Generate comprehensive test - TẤT CẢ combinations, NO LIMITS.
-        
-        Returns:
-            Dict tương tự quick suite nhưng với TẤT CẢ configs
-        """
-        print("\n" + "="*70)
-        print("GENERATING COMPREHENSIVE TEST SUITE - ALL COMBINATIONS")
-        print("="*70)
-        print("Strategy: Generate ALL possible parameter combinations")
-        print("⚠️  WARNING: This may generate THOUSANDS of configs!")
-        
-        suite = {}
-        
-        # Generate ALL combinations cho TẤT CẢ layers (no limits)
-        suite['layer1'] = self.generate_layer_configs('layer1', max_configs=None)
-        suite['layer2'] = self.generate_layer_configs('layer2', max_configs=None)
-        suite['noniid'] = self.generate_layer_configs('noniid', max_configs=None)
-        suite['filtering'] = self.generate_layer_configs('filtering', max_configs=None)
-        suite['reputation'] = self.generate_layer_configs('reputation', max_configs=None)
-        suite['mode'] = self.generate_layer_configs('mode', max_configs=None)
-        
-        total = sum(len(v) for v in suite.values())
-        print(f"\n✅ Total configs to test: {total}")
-        print("   (COMPLETE grid search - ALL combinations)")
-        print("="*70)
-        
-        return suite
-    
-    def generate_sampled_suite(self, 
-                              layer1_max: int = 50,
-                              layer2_max: int = 30,
-                              noniid_max: int = 30,
-                              filtering_max: int = 30,
-                              reputation_max: int = 50,
-                              mode_max: int = 30) -> Dict:
-        """
-        Generate SAMPLED test suite - fast version với giới hạn configs.
-        
-        Use this khi muốn chạy nhanh hơn với representative sample.
-        
-        Returns:
-            Dict với sampled configs
-        """
-        print("\n" + "="*70)
-        print("GENERATING SAMPLED TEST SUITE")
-        print("="*70)
-        print("Strategy: Random sampling from full grid")
-        print("Use this for faster experiments")
-        
-        suite = {}
-        
-        # Sample với limits
-        suite['layer1'] = self.generate_layer_configs('layer1', max_configs=layer1_max)
-        suite['layer2'] = self.generate_layer_configs('layer2', max_configs=layer2_max)
-        suite['noniid'] = self.generate_layer_configs('noniid', max_configs=noniid_max)
-        suite['filtering'] = self.generate_layer_configs('filtering', max_configs=filtering_max)
-        suite['reputation'] = self.generate_layer_configs('reputation', max_configs=reputation_max)
-        suite['mode'] = self.generate_layer_configs('mode', max_configs=mode_max)
-        
-        total = sum(len(v) for v in suite.values())
-        print(f"\n✅ Total configs to test: {total}")
-        print("   (Sampled for faster experiments)")
-        print("="*70)
-        
-        return suite
-    
-    def get_default_config(self) -> Dict:
-        """Get default config cho TẤT CẢ layers."""
-        return {
-            # Layer 1
-            'pca_dims': 20,
-            'dbscan_min_samples': 3,
-            'dbscan_eps_multiplier': 0.5,
-            'mad_k_normal': 4.0,
-            'mad_k_warmup': 6.0,
-            'voting_threshold_normal': 2,
-            'voting_threshold_warmup': 3,
-            'warmup_rounds': 10,
-            
-            # Layer 2
-            'distance_multiplier': 1.5,
-            'cosine_threshold': 0.3,
-            'layer2_warmup_rounds': 15,
-            
-            # Non-IID
-            'h_threshold_normal': 0.6,
-            'h_threshold_alert': 0.5,
-            'adaptive_multiplier': 1.5,
-            'baseline_percentile': 60,
-            
-            # Filtering
-            'hard_k_threshold': 3,
-            'soft_reputation_threshold': 0.4,
-            'soft_distance_multiplier': 2.0,
-            
-            # Reputation
-            'ema_alpha_increase': 0.4,
-            'ema_alpha_decrease': 0.2,
-            'penalty_flagged': 0.2,
-            'penalty_variance': 0.1,
-            'reward_clean': 0.1,
-            'floor_lift_threshold': 0.4,
-            
-            # Mode
-            'threshold_normal_to_alert': 0.20,
-            'threshold_alert_to_defense': 0.30,
-            'hysteresis_normal': 0.10,
-            'hysteresis_defense': 0.15,
-            'rep_gate_defense': 0.5
-        }
-    
-    def save_suite(self, suite: Dict, output_file: str = "param_suite.json"):
-        """Save test suite to JSON."""
-        
-        # Add metadata
-        data = {
-            'generated_at': datetime.now().isoformat(),
-            'total_configs': sum(len(v) for v in suite.values()),
-            'default_config': self.get_default_config(),
-            'suite': suite
-        }
-        
-        with open(output_file, 'w') as f:
-            json.dump(data, f, indent=2)
-        
-        print(f"\n💾 Saved to: {output_file}")
-        print(f"   Total configs: {data['total_configs']}")
-        
-        return output_file
+    return output
 
 
 def main():
-    """Main function."""
+    parser = argparse.ArgumentParser(description='Generate relaxed param suite')
+    parser.add_argument('--mode', choices=['sampled', 'full'], default='sampled',
+                       help='Generation mode: sampled (~300) or full (~2500)')
     
-    print("\n" + "="*70)
-    print("DEFENSE PARAMETER GENERATOR")
-    print("="*70)
+    args = parser.parse_args()
     
-    generator = DefenseParamGenerator()
+    print(f"\n{'='*80}")
+    print(f"GENERATING RELAXED PARAMETER SUITE - {args.mode.upper()} MODE")
+    print(f"{'='*80}\n")
     
-    # Calculate total possible combinations
-    total_layer1 = 1
-    for v in generator.layer1_grid.values():
-        total_layer1 *= len(v)
+    # Generate
+    suite = generate_suite(args.mode)
     
-    total_layer2 = 1
-    for v in generator.layer2_grid.values():
-        total_layer2 *= len(v)
+    # Save
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"param_suite_relaxed_{args.mode}_{timestamp}.json"
     
-    total_noniid = 1
-    for v in generator.noniid_grid.values():
-        total_noniid *= len(v)
+    with open(filename, 'w') as f:
+        json.dump(suite, f, indent=2)
     
-    total_filtering = 1
-    for v in generator.filtering_grid.values():
-        total_filtering *= len(v)
+    # Print summary
+    print(f"✅ Generated suite saved to: {filename}\n")
+    print(f"📊 SUMMARY:")
+    print(f"  Mode: {args.mode}")
+    print(f"  Total configs: {suite['total_configs']}")
+    print(f"\n  Breakdown:")
+    for layer, configs in suite['suite'].items():
+        print(f"    {layer}: {len(configs)} configs")
     
-    total_reputation = 1
-    for v in generator.reputation_grid.values():
-        total_reputation *= len(v)
+    print(f"\n⏱️  ESTIMATED TIME:")
+    est_hours = suite['total_configs'] * 10.6 / 60
+    print(f"    Total: {est_hours:.1f} hours ({est_hours/24:.1f} days)")
     
-    total_mode = 1
-    for v in generator.mode_grid.values():
-        total_mode *= len(v)
+    print(f"\n💡 PHILOSOPHY:")
+    print(f"    {suite['notes']['philosophy']}")
+    print(f"    {suite['notes']['expected']}")
     
-    grand_total = (total_layer1 + total_layer2 + total_noniid + 
-                   total_filtering + total_reputation + total_mode)
+    print(f"\n{'='*80}")
+    print(f"✅ DONE - Ready to run!")
+    print(f"{'='*80}\n")
     
-    print(f"\n📊 Maximum Possible Combinations:")
-    print(f"   Layer1: {total_layer1}")
-    print(f"   Layer2: {total_layer2}")
-    print(f"   Non-IID: {total_noniid}")
-    print(f"   Filtering: {total_filtering}")
-    print(f"   Reputation: {total_reputation}")
-    print(f"   Mode: {total_mode}")
-    print(f"   ─────────────────")
-    print(f"   TOTAL: {grand_total} configs")
-    print(f"\n⚠️  Estimated time @ 3min/config: {grand_total * 3 / 60:.1f} hours")
-    
-    # Generate quick suite (ALL combinations, per-layer)
-    print("\n1️⃣  Generating QUICK test suite (ALL per-layer combinations)...")
-    quick_suite = generator.generate_quick_test_suite()
-    generator.save_suite(quick_suite, "param_suite_quick.json")
-    
-    # Generate comprehensive suite (ALL combinations)
-    print("\n2️⃣  Generating COMPREHENSIVE test suite (ALL combinations)...")
-    comp_suite = generator.generate_comprehensive_suite()
-    generator.save_suite(comp_suite, "param_suite_comprehensive.json")
-    
-    # Generate sampled suite (for fast experiments)
-    print("\n3️⃣  Generating SAMPLED test suite (fast experiments)...")
-    sampled_suite = generator.generate_sampled_suite(
-        layer1_max=50,
-        layer2_max=30,
-        noniid_max=30,
-        filtering_max=30,
-        reputation_max=50,
-        mode_max=30
-    )
-    generator.save_suite(sampled_suite, "param_suite_sampled.json")
-    
-    print("\n" + "="*70)
-    print("✅ GENERATION COMPLETE!")
-    print("="*70)
-    print("\nGenerated files:")
-    print("  1. param_suite_quick.json        - ALL per-layer configs (recommended)")
-    print("  2. param_suite_comprehensive.json - ALL possible configs (very large)")
-    print("  3. param_suite_sampled.json      - Sampled subset (fast testing)")
-    print("\nRecommended workflow:")
-    print("  • Start: param_suite_sampled.json (fast validation)")
-    print("  • Normal: param_suite_quick.json (thorough per-layer)")
-    print("  • Final: param_suite_comprehensive.json (complete grid search)")
-    print("\nNext steps:")
-    print("  python run_param_tests.py param_suite_quick.json")
-    print("="*70 + "\n")
+    print(f"Next steps:")
+    print(f"  1. Review: cat {filename} | jq '.notes'")
+    print(f"  2. Run: python -u run_param_tests.py {filename}")
+    print(f"  3. Monitor: tail -f test_logs/test_*.log")
+    print()
 
 
 if __name__ == "__main__":

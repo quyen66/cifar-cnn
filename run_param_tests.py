@@ -29,12 +29,16 @@ import time
 class ParamTestRunner:
     """Tự động chạy tests với các param combinations."""
     
-    def __init__(self, suite_file: str):
+    def __init__(self, suite_file: str, enable_model_saving: bool = False, resume_from: str = None):
         """
         Args:
             suite_file: Path to param suite JSON
+            enable_model_saving: Save models during tests (default: False for speed)
+            resume_from: Path to previous results JSON to resume from
         """
         self.suite_file = Path(suite_file)
+        self.enable_model_saving = enable_model_saving
+        self.resume_from = resume_from
         
         # Load suite
         with open(self.suite_file, 'r') as f:
@@ -45,7 +49,7 @@ class ParamTestRunner:
         
         # Test configuration
         self.num_clients = 40
-        self.num_rounds = 30  # Reduced from 30 for faster testing
+        self.num_rounds = 25  # Reduced from 30 for faster testing
         
         # Attack scenario (FIXED để focus vào param tuning)
         self.attack_type = "byzantine"
@@ -56,6 +60,11 @@ class ParamTestRunner:
         # Results
         self.results = []
         self.failed_tests = []
+        self.completed_tests = set()  # Track completed test IDs
+        
+        # Load previous results if resuming
+        if self.resume_from:
+            self._load_previous_results()
     
     def generate_run_config(self, layer: str, config: Dict) -> str:
         """
@@ -84,6 +93,18 @@ class ParamTestRunner:
             'enable-defense=true',
         ]
         
+        # Model saving
+        if self.enable_model_saving:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_dir_path = f'results/param_tuning/{layer}/{timestamp}'
+            from pathlib import Path
+            Path(save_dir_path).mkdir(parents=True, exist_ok=True)
+            parts.append(f'auto-save=true')
+            parts.append(f'save-dir="{save_dir_path}"')
+            parts.append(f'save-interval=10')
+        else:
+            parts.append('auto-save=false')
+        
         # Add defense params với CORRECT format: defense.layer.param-name
         # Map layer name to config key
         layer_prefix_map = {
@@ -109,12 +130,6 @@ class ParamTestRunner:
                     parts.append(f'{prefix}.{param_name}="{value}"')
                 else:
                     parts.append(f'{prefix}.{param_name}={value}')
-        
-        # Save dir
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_dir = f'"results/param_tuning/{layer}/{timestamp}"'
-        parts.append(f'save-dir={save_dir}')
-        parts.append('save-interval=10')
         
         # Join
         run_config = ' '.join(parts)
@@ -305,6 +320,11 @@ class ParamTestRunner:
             for idx, config in enumerate(configs):
                 test_num += 1
                 
+                # Skip if already completed
+                if self._is_test_completed(layer, idx):
+                    print(f"\n[{test_num}/{total_tests}] ⏭️  Skipping {layer.upper()} config #{idx+1} (already completed)")
+                    continue
+                
                 print(f"\n[{test_num}/{total_tests}] ", end='')
                 
                 result = self.run_single_test(layer, idx, config)
@@ -380,26 +400,70 @@ class ParamTestRunner:
         print("="*70 + "\n")
         
         return output_file
+    
+    def _load_previous_results(self):
+        """Load previous results để resume."""
+        try:
+            with open(self.resume_from, 'r') as f:
+                data = json.load(f)
+            
+            # Load results
+            self.results = data.get('results', [])
+            self.failed_tests = data.get('failures', [])
+            
+            # Track completed tests
+            for result in self.results + self.failed_tests:
+                test_id = f"{result['layer']}_{result['config_idx']}"
+                self.completed_tests.add(test_id)
+            
+            print(f"\n{'='*70}")
+            print(f"📂 RESUMING FROM PREVIOUS RUN")
+            print(f"{'='*70}")
+            print(f"Previous results file: {self.resume_from}")
+            print(f"Completed tests: {len(self.completed_tests)}")
+            print(f"  ✓ Successful: {len(self.results)}")
+            print(f"  ✗ Failed: {len(self.failed_tests)}")
+            print(f"{'='*70}\n")
+            
+        except Exception as e:
+            print(f"⚠️  Could not load previous results: {e}")
+            print("Starting from scratch...\n")
+            self.completed_tests = set()
+    
+    def _is_test_completed(self, layer: str, config_idx: int) -> bool:
+        """Check if test đã chạy rồi."""
+        test_id = f"{layer}_{config_idx}"
+        return test_id in self.completed_tests
 
 
 def main():
     """Main function."""
+    import argparse
     
-    if len(sys.argv) < 2:
-        print("Usage: python run_param_tests.py <suite_json_file>")
-        print("Example: python run_param_tests.py param_suite_quick.json")
+    parser = argparse.ArgumentParser(description='Run parameter tuning tests')
+    parser.add_argument('suite_file', help='Path to param suite JSON file')
+    parser.add_argument('--resume', '-r', help='Resume from previous results JSON file')
+    parser.add_argument('--save-models', action='store_true', help='Enable model saving')
+    
+    args = parser.parse_args()
+    
+    if not Path(args.suite_file).exists():
+        print(f"❌ File not found: {args.suite_file}")
         sys.exit(1)
     
-    suite_file = sys.argv[1]
-    
-    if not Path(suite_file).exists():
-        print(f"❌ File not found: {suite_file}")
+    # Check resume file if provided
+    if args.resume and not Path(args.resume).exists():
+        print(f"❌ Resume file not found: {args.resume}")
         sys.exit(1)
     
     # Create runner
-    runner = ParamTestRunner(suite_file)
+    runner = ParamTestRunner(
+        suite_file=args.suite_file,
+        enable_model_saving=args.save_models,
+        resume_from=args.resume
+    )
     
-    # Run all tests
+    # Run all tests (will skip completed ones if resuming)
     runner.run_all_tests()
 
 
