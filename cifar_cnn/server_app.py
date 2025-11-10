@@ -62,6 +62,10 @@ class FullPipelineStrategy(FedProx):
                  **kwargs):
         super().__init__(*args, **kwargs)
         
+        # Client ID mappings
+        self.client_id_to_sequential = {}
+        self.sequential_to_client_id = {}
+
         # Model saving
         self.auto_save = auto_save
         self.save_dir = save_dir
@@ -195,6 +199,32 @@ class FullPipelineStrategy(FedProx):
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]] | None:
         """Aggregate fit results với FULL DEFENSE PIPELINE."""
         
+        # CREATE CLIENT ID MAPPING (first time only)
+        if not self.client_id_to_sequential:
+            # Get all client IDs from results
+            all_client_ids = [client_proxy.cid for client_proxy, _ in results]
+            
+            # Sort to ensure consistent mapping
+            sorted_client_ids = sorted(all_client_ids)
+            
+            # Create bidirectional mapping with BOTH formats
+            for idx, client_id in enumerate(sorted_client_ids):
+                # Store with original format
+                self.client_id_to_sequential[client_id] = idx
+                # Also store string version
+                self.client_id_to_sequential[str(client_id)] = idx
+                # Also store int version if possible
+                try:
+                    self.client_id_to_sequential[int(client_id)] = idx
+                except:
+                    pass
+                
+                self.sequential_to_client_id[idx] = client_id
+            
+            print(f"✅ Created client ID mapping: {len(sorted_client_ids)} clients")
+            print(f"   Mapping key types: {[type(k).__name__ for k in list(self.client_id_to_sequential.keys())[:3]]}")
+            
+            
         if not results:
             return None
         
@@ -352,55 +382,57 @@ class FullPipelineStrategy(FedProx):
         return aggregated_parameters, {}
     
     def _calculate_metrics(self, server_round, detected_ids, new_mode, rho, H):
-        """Calculate detection metrics."""
-        true_malicious = self.malicious_clients
-        detected_malicious = set(detected_ids)
+        """Calculate detection metrics with proper ID mapping."""
+            # ADD THIS DEBUG
+        print(f"\n🔍 DEBUG _calculate_metrics:")
+        print(f"   detected_ids type: {type(detected_ids)}")
+        print(f"   detected_ids length: {len(detected_ids)}")
+        print(f"   detected_ids sample: {list(detected_ids)[:5] if detected_ids else 'EMPTY'}")
+        print(f"   malicious_clients: {self.malicious_clients}")
+
+        # STEP 1: Map detected hashed IDs to sequential IDs
+        detected_sequential = set()
+        for hashed_id in detected_ids:
+            seq_id = self.client_id_to_sequential.get(hashed_id, -1)
+            if seq_id != -1:
+                detected_sequential.add(seq_id)
         
-        # Confusion matrix
-        tp = len(true_malicious & detected_malicious)
-        fp = len(detected_malicious - true_malicious)
-        fn = len(true_malicious - detected_malicious)
-        tn = len([cid for cid in range(self.config_metadata.get('num_clients', 40))
-                  if cid not in true_malicious and cid not in detected_malicious])
+        # STEP 2: Ground truth (may be empty if no attack)
+        true_malicious = self.malicious_clients  # Set of sequential IDs
         
-        # Update totals
+        # STEP 3: Calculate metrics ALWAYS (even if no attack)
+        num_clients = self.config_metadata.get('num_clients', 40)
+        
+        tp = len(true_malicious & detected_sequential)
+        fp = len(detected_sequential - true_malicious)  # Detected but not malicious
+        fn = len(true_malicious - detected_sequential)  # Malicious but not detected
+        tn = num_clients - tp - fp - fn  # Everything else
+        
+        # STEP 4: Calculate rates
+        total_malicious = len(true_malicious)
+        total_benign = num_clients - total_malicious
+        
+        detection_rate = (tp / total_malicious * 100) if total_malicious > 0 else 0.0
+        fpr = (fp / total_benign * 100) if total_benign > 0 else 0.0
+        precision = (tp / (tp + fp) * 100) if (tp + fp) > 0 else 0.0
+        f1 = (2 * tp / (2 * tp + fp + fn) * 100) if (2 * tp + fp + fn) > 0 else 0.0
+        
+        # STEP 5: Accumulate totals
         self.total_tp += tp
         self.total_fp += fp
         self.total_fn += fn
         self.total_tn += tn
         
-        # Metrics
-        detection_rate = (tp / len(true_malicious) * 100) if len(true_malicious) > 0 else 0
-        fpr = (fp / (fp + tn) * 100) if (fp + tn) > 0 else 0
-        precision = (tp / (tp + fp) * 100) if (tp + fp) > 0 else 0
-        recall = detection_rate
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0
-        
+        # STEP 6: Print metrics
         print(f"\n📈 DETECTION METRICS")
-        print("─"*70)
+        print(f"{'─'*70}")
         print(f"   TP={tp}, FP={fp}, FN={fn}, TN={tn}")
         print(f"   Detection: {detection_rate:.1f}%")
         print(f"   FPR: {fpr:.1f}%")
         print(f"   Precision: {precision:.1f}%")
         print(f"   F1: {f1:.1f}%")
-        
-        # Save to history
-        self.detection_history.append({
-            'round': server_round,
-            'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn,
-            'detection_rate': detection_rate,
-            'fpr': fpr,
-            'precision': precision,
-            'f1': f1,
-            'mode': new_mode,
-            'threat_ratio': rho,
-            'heterogeneity': H,
-            'detected_ids': list(detected_malicious),
-            'ground_truth': list(true_malicious)
-        })
-        
-        print(f"{'='*70}\n")
-    
+        print(f"{'═'*70}")
+            
     def _generate_model_name(self, server_round):
         """Generate model name."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -115,7 +115,7 @@ distance-multiplier = 1.5
 cosine-threshold = 0.3
 
 # Warmup Phase
-warmup-rounds = 15
+layer2_warmup_rounds = 15
 
 # =====================================================================
 # DEFENSE PARAMETERS - NON-IID HANDLER

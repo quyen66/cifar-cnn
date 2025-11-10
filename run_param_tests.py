@@ -49,7 +49,7 @@ class ParamTestRunner:
         
         # Test configuration
         self.num_clients = 40
-        self.num_rounds = 25  # Reduced from 30 for faster testing
+        self.num_rounds = 20  # Keep at 10 for faster testing
         
         # Attack scenario (FIXED để focus vào param tuning)
         self.attack_type = "byzantine"
@@ -70,17 +70,16 @@ class ParamTestRunner:
         """
         Generate --run-config string cho flwr run.
         
+        SIMPLIFIED: Chỉ override params cho layer đang test.
+        Các layers khác dùng pyproject.toml defaults.
+        
         Args:
-            layer: Layer name
+            layer: Layer name đang test  
             config: Param config cho layer đó
         
         Returns:
-            run-config string (with proper quotes)
+            run-config string
         """
-        # Merge với default
-        full_config = self.default_config.copy()
-        full_config.update(config)
-        
         # Base config
         parts = [
             f'num-clients={self.num_clients}',
@@ -91,22 +90,10 @@ class ParamTestRunner:
             f'byzantine-type="{self.byzantine_type}"',
             f'byzantine-scale={self.byzantine_scale}',
             'enable-defense=true',
+            'auto-save=false',  # Disabled for param tuning
         ]
         
-        # Model saving
-        if self.enable_model_saving:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_dir_path = f'results/param_tuning/{layer}/{timestamp}'
-            from pathlib import Path
-            Path(save_dir_path).mkdir(parents=True, exist_ok=True)
-            parts.append(f'auto-save=true')
-            parts.append(f'save-dir="{save_dir_path}"')
-            parts.append(f'save-interval=10')
-        else:
-            parts.append('auto-save=false')
-        
-        # Add defense params với CORRECT format: defense.layer.param-name
-        # Map layer name to config key
+        # Map layer name to config prefix
         layer_prefix_map = {
             'layer1': 'defense.layer1',
             'layer2': 'defense.layer2',
@@ -116,22 +103,21 @@ class ParamTestRunner:
             'mode': 'defense.mode'
         }
         
-        # Get prefix cho layer này
+        # Apply params cho layer đang test ONLY
         if layer in layer_prefix_map:
             prefix = layer_prefix_map[layer]
             
-            # Add params với đúng format
             for key, value in config.items():
                 # Convert snake_case to kebab-case
                 param_name = key.replace('_', '-')
                 
-                # Format: defense.layer1.pca-dims=20
+                # Format value
                 if isinstance(value, str):
                     parts.append(f'{prefix}.{param_name}="{value}"')
                 else:
                     parts.append(f'{prefix}.{param_name}={value}')
         
-        # Join
+        # Join all parts
         run_config = ' '.join(parts)
         
         return run_config
@@ -215,11 +201,18 @@ class ParamTestRunner:
                 # Parse accuracy từ output
                 accuracy = self._parse_accuracy(full_output)
                 
+                # Parse detection metrics (TP/FP/FN/TN) - CRITICAL for Layer1 optimization
+                detection_metrics = self._parse_detection_metrics(full_output)
+                
                 # If accuracy is 0, save full log
                 if accuracy == 0.0:
                     print(f"  ⚠️  Accuracy=0.0, full log saved to: {log_file}")
                 else:
                     print(f"  ✓ Parsed accuracy: {accuracy:.3f}")
+                
+                # Show detection metrics
+                print(f"  ✓ Detection: TP={detection_metrics['tp']}, FP={detection_metrics['fp']}, "
+                      f"FN={detection_metrics['fn']}, TN={detection_metrics['tn']}")
                 
                 return {
                     'layer': layer,
@@ -227,6 +220,7 @@ class ParamTestRunner:
                     'config': config,
                     'success': True,
                     'accuracy': accuracy,
+                    'detection': detection_metrics,  # Add detection metrics
                     'elapsed_time': elapsed,
                     'log_file': log_file,
                     'timestamp': datetime.now().isoformat()
@@ -295,51 +289,101 @@ class ParamTestRunner:
         print("  ⚠️  Could not parse accuracy from output, returning 0.0")
         return 0.0  # Default nếu không parse được
     
+    def _parse_detection_metrics(self, output: str) -> Dict[str, int]:
+        """
+        Parse detection metrics (TP/FP/FN/TN) from output.
+        
+        Looks for patterns like:
+        - "TP=5, FP=2, FN=7, TN=28"
+        - "Detection: TP=5 FP=2 FN=7 TN=28"
+        - Line with all 4 metrics
+        
+        Returns:
+            Dict with tp, fp, fn, tn counts
+        """
+        import re
+        
+        lines = output.split('\n')
+        
+        # Default values
+        metrics = {'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0}
+        
+        # Look for detection metrics line
+        for line in lines:
+            line_lower = line.lower()
+            
+            # Check if line contains all 4 metrics
+            if 'tp' in line_lower and 'fp' in line_lower and 'fn' in line_lower and 'tn' in line_lower:
+                # Try to extract numbers
+                # Pattern: TP=5, FP=2, FN=7, TN=28
+                tp_match = re.search(r'tp[=:\s]+(\d+)', line_lower)
+                fp_match = re.search(r'fp[=:\s]+(\d+)', line_lower)
+                fn_match = re.search(r'fn[=:\s]+(\d+)', line_lower)
+                tn_match = re.search(r'tn[=:\s]+(\d+)', line_lower)
+                
+                if tp_match and fp_match and fn_match and tn_match:
+                    metrics['tp'] = int(tp_match.group(1))
+                    metrics['fp'] = int(fp_match.group(1))
+                    metrics['fn'] = int(fn_match.group(1))
+                    metrics['tn'] = int(tn_match.group(1))
+                    return metrics
+        
+        # If not found, return zeros
+        # (This is OK - just means detection metrics not available in output)
+        return metrics
+    
     def run_all_tests(self):
-        """Chạy tất cả tests trong suite."""
+        """Chạy tất cả tests trong suite - LAYER1 ONLY."""
         
         print("\n" + "="*70)
-        print("STARTING PARAMETER TESTS")
+        print("STARTING PARAMETER TESTS - LAYER1 ONLY")
         print("="*70)
         print(f"Suite file: {self.suite_file}")
         
-        total_tests = sum(len(configs) for configs in self.suite.values())
-        print(f"Total tests: {total_tests}")
+        # Count ONLY layer1 tests
+        layer1_tests = len(self.suite.get('layer1', []))
+        print(f"Total tests: {layer1_tests} (Layer1 only)")
         print(f"Attack scenario: {self.attack_type} @ {self.attack_ratio:.0%}")
         print("="*70 + "\n")
         
         test_num = 0
         
-        # Test từng layer
-        for layer, configs in self.suite.items():
-            print(f"\n{'='*70}")
-            print(f"🔍 Testing {layer.upper()}")
-            print(f"   Configs: {len(configs)}")
-            print(f"{'='*70}")
+        # ONLY test Layer1
+        layer = 'layer1'
+        configs = self.suite.get(layer, [])
+        
+        if not configs:
+            print(f"❌ No Layer1 configs found in suite!")
+            return
+        
+        print(f"\n{'='*70}")
+        print(f"🔍 Testing LAYER1")
+        print(f"   Configs: {len(configs)}")
+        print(f"{'='*70}")
+        
+        for idx, config in enumerate(configs):
+            test_num += 1
             
-            for idx, config in enumerate(configs):
-                test_num += 1
-                
-                # Skip if already completed
-                if self._is_test_completed(layer, idx):
-                    print(f"\n[{test_num}/{total_tests}] ⏭️  Skipping {layer.upper()} config #{idx+1} (already completed)")
-                    continue
-                
-                print(f"\n[{test_num}/{total_tests}] ", end='')
-                
-                result = self.run_single_test(layer, idx, config)
-                
-                if result['success']:
-                    self.results.append(result)
-                else:
-                    self.failed_tests.append(result)
-                
-                # Save intermediate results
-                if test_num % 5 == 0:
-                    self._save_intermediate_results()
-                
-                # Small delay
-                time.sleep(2)
+            # Skip if already completed
+            if self._is_test_completed(layer, idx):
+                print(f"\n[{test_num}/{layer1_tests}] ⏭️  Skipping LAYER1 config #{idx+1} (already completed)")
+                continue
+            
+            print(f"\n[{test_num}/{layer1_tests}] ", end='')
+            
+            result = self.run_single_test(layer, idx, config)
+            
+            if result['success']:
+                self.results.append(result)
+            else:
+                self.failed_tests.append(result)
+            
+            # Save intermediate results
+            if test_num % 5 == 0:
+                self._save_intermediate_results()
+            
+            # Small delay
+            time.sleep(2)
         
         # Final save
         self._save_final_results()
@@ -365,6 +409,10 @@ class ParamTestRunner:
         
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
+        
+        # Log save
+        print(f"\n💾 Saved intermediate results to: {output_file}")
+        print(f"   Completed: {len(self.results)}, Failed: {len(self.failed_tests)}\n")
     
     def _save_final_results(self):
         """Save final results."""
@@ -394,10 +442,16 @@ class ParamTestRunner:
         print("\n" + "="*70)
         print("✅ ALL TESTS COMPLETE!")
         print("="*70)
-        print(f"Results saved to: {output_file}")
-        print(f"Successful: {len(self.results)}")
-        print(f"Failed: {len(self.failed_tests)}")
+        print(f"📁 Results saved to: {output_file}")
+        print(f"   Successful: {len(self.results)}")
+        print(f"   Failed: {len(self.failed_tests)}")
+        print(f"   Total: {len(self.results) + len(self.failed_tests)}")
         print("="*70 + "\n")
+        
+        print(f"📊 Next steps:")
+        print(f"   1. Analyze: python analyze_param_results.py")
+        print(f"   2. View: cat {output_file} | jq '.total_tests'")
+        print()
         
         return output_file
     
