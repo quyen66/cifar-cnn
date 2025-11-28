@@ -25,31 +25,42 @@ class NonIIDHandler:
                  h_threshold_normal: float = 0.6,
                  h_threshold_alert: float = 0.5,
                  adaptive_multiplier: float = 1.5,
+                 adjustment_factor: float = 0.4,  
                  baseline_percentile: int = 60,
-                 baseline_window_size: int = 10):
+                 baseline_window_size: int = 10,
+                 delta_norm_weight: float = 0.5,  
+                 delta_direction_weight: float = 0.5):  
         """
         Initialize Non-IID Handler with configurable parameters.
         
         Args:
             h_threshold_normal: H threshold for NORMAL mode
             h_threshold_alert: H threshold for ALERT mode
-            adaptive_multiplier: Multiplier for adaptive thresholds
+            adaptive_multiplier: Multiplier for adaptive thresholds when H high
+            adjustment_factor: Factor trong công thức θ_adj = θ_base + (H-0.5) × factor
             baseline_percentile: Percentile for baseline computation
             baseline_window_size: Window size for gradient history
+            delta_norm_weight: Weight cho norm deviation trong δi calculation
+            delta_direction_weight: Weight cho direction deviation trong δi calculation
         """
         self.h_threshold_normal = h_threshold_normal
         self.h_threshold_alert = h_threshold_alert
         self.adaptive_multiplier = adaptive_multiplier
+        self.adjustment_factor = adjustment_factor  
         self.baseline_percentile = baseline_percentile
         self.baseline_window_size = baseline_window_size
+        self.delta_norm_weight = delta_norm_weight  
+        self.delta_direction_weight = delta_direction_weight  
         
         # Client gradient history
         self.client_gradients = {}
         
-        print(f"✅ NonIIDHandler initialized (VERIFIED) with params:")
+        print(f"✅ NonIIDHandler initialized (FIXED) with params:")
         print(f"   H thresholds: normal={h_threshold_normal}, alert={h_threshold_alert}")
         print(f"   Adaptive multiplier: {adaptive_multiplier}")
+        print(f"   Adjustment factor: {adjustment_factor}") 
         print(f"   Baseline: percentile={baseline_percentile}, window={baseline_window_size}")
+        print(f"   Delta weights: norm={delta_norm_weight}, direction={delta_direction_weight}")
     
     def compute_heterogeneity_score(self, 
                                     gradients: List[np.ndarray],
@@ -151,7 +162,7 @@ class NonIIDHandler:
         """
         Get adaptive threshold based on H score and mode.
         
-        LOGIC: Higher H → Looser threshold (to reduce false positives)
+        HYBRID: Combine mode-based thresholds với PDF formula
         
         Args:
             H: Heterogeneity score (0-1)
@@ -159,27 +170,26 @@ class NonIIDHandler:
             base_threshold: Base threshold value
         
         Returns:
-            Adaptive threshold (adjusted based on H and mode)
-        
-        Example:
-            - H=0.7 (high), mode=NORMAL, base=0.4
-            - h_threshold_normal=0.6
-            - H > 0.6 → High heterogeneity
-            - adaptive = 0.4 × 1.5 = 0.6 (loosen to reduce FP)
+            Adaptive threshold
         """
         # Determine H threshold based on mode
         if mode == 'NORMAL':
-            h_threshold = self.h_threshold_normal  # 0.6
+            h_threshold = self.h_threshold_normal
         elif mode == 'ALERT':
-            h_threshold = self.h_threshold_alert  # 0.5
+            h_threshold = self.h_threshold_alert
         else:  # DEFENSE
-            h_threshold = 0.4  # Stricter in DEFENSE mode
+            h_threshold = 0.4
         
-        # If H > threshold → High heterogeneity → Loosen threshold
+        # If H > threshold → Apply PDF formula adjustment
         if H > h_threshold:
-            adaptive_threshold = base_threshold * self.adaptive_multiplier
+            # Use PDF formula: θ_adj = θ_base + (H - 0.5) × adjustment_factor
+            adjustment = (H - h_threshold) * self.adjustment_factor
+            adaptive_threshold = base_threshold + adjustment
         else:
             adaptive_threshold = base_threshold
+        
+        # Clip to reasonable range
+        adaptive_threshold = np.clip(adaptive_threshold, 0.3, 0.95)
         
         return adaptive_threshold
     
@@ -242,6 +252,77 @@ class NonIIDHandler:
         
         return deviation
     
+    def compute_baseline_deviation_detailed(self,
+                                           client_id: int,
+                                           current_gradient: np.ndarray,
+                                           median_gradient: np.ndarray) -> Dict[str, float]:
+        """
+        Compute detailed baseline deviation with norm + direction components.
+        
+        Formula from PDF trang 10:
+        δi = delta_norm_weight × δ_norm(i) + delta_direction_weight × δ_dir(i)
+        
+        Args:
+            client_id: Client ID
+            current_gradient: Current gradient
+            median_gradient: Median gradient from all clients
+        
+        Returns:
+            Dict with 'delta_norm', 'delta_direction', 'delta_combined'
+        """
+        if client_id not in self.client_gradients:
+            return {
+                'delta_norm': 0.0,
+                'delta_direction': 0.0,
+                'delta_combined': 0.0
+            }
+        
+        history = list(self.client_gradients[client_id])
+        if len(history) < 2:
+            return {
+                'delta_norm': 0.0,
+                'delta_direction': 0.0,
+                'delta_combined': 0.0
+            }
+        
+        # ===== Component 1: Norm Deviation =====
+        # Historical baseline
+        historical_norms = [np.linalg.norm(g) for g in history]
+        baseline_norm = np.percentile(historical_norms, self.baseline_percentile)
+        
+        # Current norm
+        current_norm = np.linalg.norm(current_gradient.flatten())
+        
+        # Normalized deviation
+        delta_norm = abs(current_norm - baseline_norm) / (baseline_norm + 1e-10)
+        
+        # ===== Component 2: Direction Deviation =====
+        # Compute cosine similarity với median gradient
+        current_flat = current_gradient.flatten()
+        median_flat = median_gradient.flatten()
+        
+        cosine_sim = np.dot(current_flat, median_flat) / (
+            np.linalg.norm(current_flat) * np.linalg.norm(median_flat) + 1e-10
+        )
+        
+        # Direction deviation: 1 - cosine_sim
+        # High cosine_sim (close to 1) → Low delta_direction (good)
+        # Low cosine_sim (close to -1) → High delta_direction (bad)
+        delta_direction = max(0.0, 1.0 - cosine_sim)
+        
+        # ===== Combine với weights từ config =====
+        # Formula: δi = delta_norm_weight × δ_norm + delta_direction_weight × δ_dir
+        delta_combined = (
+            self.delta_norm_weight * delta_norm +
+            self.delta_direction_weight * delta_direction
+        )
+        
+        return {
+            'delta_norm': delta_norm,
+            'delta_direction': delta_direction,
+            'delta_combined': delta_combined
+        }
+
     def get_stats(self) -> Dict:
         """Get handler statistics."""
         return {

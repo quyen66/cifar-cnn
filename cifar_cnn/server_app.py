@@ -147,14 +147,19 @@ class FullPipelineStrategy(FedProx):
             h_threshold_normal=noniid_params.get('h_threshold_normal', 0.6),
             h_threshold_alert=noniid_params.get('h_threshold_alert', 0.5),
             adaptive_multiplier=noniid_params.get('adaptive_multiplier', 1.5),
+            adjustment_factor=noniid_params.get('adjustment_factor', 0.4),  # NEW
             baseline_percentile=noniid_params.get('baseline_percentile', 60),
-            baseline_window_size=noniid_params.get('baseline_window_size', 10)
+            baseline_window_size=noniid_params.get('baseline_window_size', 10),
+            delta_norm_weight=noniid_params.get('delta_norm_weight', 0.5),  # NEW
+            delta_direction_weight=noniid_params.get('delta_direction_weight', 0.5)  # NEW
         )
         
         # Two-Stage Filter
         filtering_params = self.defense_params.get('filtering', {})
         self.two_stage_filter = TwoStageFilter(
             hard_k_threshold=filtering_params.get('hard_k_threshold', 3),
+            hard_threshold_min=filtering_params.get('hard_threshold_min', 0.85),  # NEW
+            hard_threshold_max=filtering_params.get('hard_threshold_max', 0.95),  # NEW
             soft_reputation_threshold=filtering_params.get('soft_reputation_threshold', 0.4),
             soft_distance_multiplier=filtering_params.get('soft_distance_multiplier', 2.0),
             soft_enabled=filtering_params.get('soft_enabled', True)
@@ -282,27 +287,49 @@ class FullPipelineStrategy(FedProx):
         # Compute H score
         H = self.noniid_handler.compute_heterogeneity_score(gradients, client_ids)
         print(f"   Heterogeneity: H = {H:.3f}")
+        grad_median = np.median(np.vstack(gradients), axis=0)
         
-        # === STAGE 2.5: FIX - Compute Baseline Deviations ===
-        print(f"\n🔬 STAGE 2.5: BASELINE TRACKING (FIX)")
+        # === STAGE 2.5: FIX - Compute Baseline Deviations (DETAILED) ===
+        print(f"\n🔬 STAGE 2.5: BASELINE TRACKING (DETAILED)")
         print("─"*70)
         
         baseline_deviations = {}
         for i, cid in enumerate(client_ids):
-            deviation = self.noniid_handler.compute_baseline_deviation(
-                cid, gradients[i]
+            # Use detailed version với norm + direction components
+            dev_details = self.noniid_handler.compute_baseline_deviation_detailed(
+                cid, gradients[i], grad_median
             )
-            baseline_deviations[cid] = deviation
+            baseline_deviations[cid] = dev_details['delta_combined']
+            
+            # Log details cho clients có deviation cao
+            if dev_details['delta_combined'] > 0.3:
+                print(f"   Client {cid}: δ={dev_details['delta_combined']:.3f} "
+                      f"(norm={dev_details['delta_norm']:.3f}, "
+                      f"dir={dev_details['delta_direction']:.3f})")
         
         num_high_deviation = sum(1 for d in baseline_deviations.values() if d > 0.3)
         print(f"   Clients with high deviation (>0.3): {num_high_deviation}/{len(client_ids)}")
         
+        # Optional: Log component statistics
+        if num_high_deviation > 0:
+            avg_norm = np.mean([
+                self.noniid_handler.compute_baseline_deviation_detailed(
+                    cid, gradients[i], grad_median
+                )['delta_norm']
+                for i, cid in enumerate(client_ids)
+            ])
+            avg_dir = np.mean([
+                self.noniid_handler.compute_baseline_deviation_detailed(
+                    cid, gradients[i], grad_median
+                )['delta_direction']
+                for i, cid in enumerate(client_ids)
+            ])
+            print(f"   Avg components: norm={avg_norm:.3f}, direction={avg_dir:.3f}")
+        
         # === STAGE 3: FIX - Confidence Scoring with Baseline Factor ===
         print(f"\n💯 STAGE 3: CONFIDENCE SCORING (FIX)")
         print("─"*70)
-        
-        grad_median = np.median(np.vstack(gradients), axis=0)
-        
+                
         # Initialize reputations
         reputations = {}
         for cid in client_ids:
@@ -583,12 +610,17 @@ def server_fn(context: Context) -> ServerAppComponents:
             'h_threshold_normal': context.run_config.get("defense.noniid.h-threshold-normal", 0.6),
             'h_threshold_alert': context.run_config.get("defense.noniid.h-threshold-alert", 0.5),
             'adaptive_multiplier': context.run_config.get("defense.noniid.adaptive-multiplier", 1.5),
+            'adjustment_factor': context.run_config.get("defense.noniid.adjustment-factor", 0.4),  # NEW
             'baseline_percentile': context.run_config.get("defense.noniid.baseline-percentile", 60),
-            'baseline_window_size': context.run_config.get("defense.noniid.baseline-window-size", 10)
+            'baseline_window_size': context.run_config.get("defense.noniid.baseline-window-size", 10),
+            'delta_norm_weight': context.run_config.get("defense.noniid.delta-norm-weight", 0.5),  # NEW
+            'delta_direction_weight': context.run_config.get("defense.noniid.delta-direction-weight", 0.5)  # NEW
         }
         
         defense_params['filtering'] = {
             'hard_k_threshold': context.run_config.get("defense.filtering.hard-k-threshold", 3),
+            'hard_threshold_min': context.run_config.get("defense.filtering.hard-threshold-min", 0.85),  # NEW
+            'hard_threshold_max': context.run_config.get("defense.filtering.hard-threshold-max", 0.95),  # NEW
             'soft_reputation_threshold': context.run_config.get("defense.filtering.soft-reputation-threshold", 0.4),
             'soft_distance_multiplier': context.run_config.get("defense.filtering.soft-distance-multiplier", 2.0),
             'soft_enabled': context.run_config.get("defense.filtering.soft-enabled", True)

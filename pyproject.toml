@@ -1,14 +1,10 @@
-# =====================================================================
-# Full Configuration với Defense Parameters
-# =====================================================================
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "cifar-cnn"
-version = "1.0.0"
+version = "1.0.1"
 description = "Federated Learning với Hybrid Adaptive Defense System"
 license = "Apache-2.0"
 dependencies = [
@@ -85,61 +81,99 @@ enable-defense = true
 # =====================================================================
 # DEFENSE PARAMETERS - LAYER 1: DBSCAN DETECTION
 # =====================================================================
+# Phát hiện nhanh các mối đe dọa rõ ràng bằng:
+# - Magnitude Filter (MAD-based): Đánh dấu nếu ||gi|| > Median + k×MAD
+# - DBSCAN Clustering: Tìm outliers trong không gian 20D
+# - Voting: Kết hợp cả 2 phương pháp
+# =====================================================================
 [tool.flwr.app.config.defense.layer1]
-# PCA Configuration
+
+# PCA Configuration (từ PDF trang 10: "chiếu gradient từ Rd xuống R20")
 pca-dims = 20
 
-# DBSCAN Configuration
+# DBSCAN Configuration (từ PDF: "ε = 0.5×median_dist, minPts = 3")
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 0.5
 
-# Magnitude Filter (MAD-based)
+# Magnitude Filter (từ PDF: "k = 4")
 mad-k-normal = 4.0
 mad-k-warmup = 6.0
 
-# Voting Mechanism
+# Voting Mechanism (từ PDF: "cả hai phương pháp đồng ý")
 voting-threshold-normal = 2
 voting-threshold-warmup = 3
 
-# Warmup Phase
+# Warmup Phase (implementation detail)
 warmup-rounds = 10
 
 # =====================================================================
 # DEFENSE PARAMETERS - LAYER 2: DISTANCE + DIRECTION DETECTION
 # =====================================================================
+# Phân tích sâu các gradient chưa bị Layer 1 phát hiện:
+# - Distance: ||gi - gmedian|| > 1.5×median
+# - Direction: cosine similarity < 0.3
+# =====================================================================
 [tool.flwr.app.config.defense.layer2]
-# Distance Check
+
+# Distance Check (từ PDF: "1.5×median")
 distance-multiplier = 1.5
 
-# Direction Check (Cosine Similarity)
+# Direction Check (từ PDF: "< 0.3")
 cosine-threshold = 0.3
 
 # Warmup Phase
-layer2_warmup_rounds = 15
+warmup-rounds = 15
 
 # =====================================================================
 # DEFENSE PARAMETERS - NON-IID HANDLER
 # =====================================================================
+# Xử lý dữ liệu không đồng nhất để giảm false positives:
+# - Heterogeneity Score: H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+# - Adaptive Thresholds: θ_adj = clip(θ_base + (H-0.5)×0.4)
+# - Baseline Tracking: δi = 0.5×δ_norm(i) + 0.5×δ_dir(i)
+# =====================================================================
 [tool.flwr.app.config.defense.noniid]
-# Heterogeneity Thresholds
+
+# Heterogeneity Thresholds (implementation choice)
 h-threshold-normal = 0.6
 h-threshold-alert = 0.5
 
-# Adaptive Multiplier
+# Adaptive Multiplier (cho công thức θ_adj khi H cao)
 adaptive-multiplier = 1.5
+
+# FIX #1: Adjustment Factor (từ PDF trang 10)
+# Formula: θ_adj = clip(θ_base + (H - 0.5) × adjustment_factor)
+# PDF: θ_adj = clip(θ_base + (H - 0.5) × 0.4)
+adjustment-factor = 0.4
 
 # Baseline Tracking
 baseline-percentile = 60
 baseline-window-size = 10
 
+# FIX #2: Baseline Deviation Weights (từ PDF trang 10)
+# Formula: δi = delta_norm_weight × δ_norm(i) + delta_direction_weight × δ_dir(i)
+# PDF: δi = 0.5×δ_norm(i) + 0.5×δ_dir(i)
+delta-norm-weight = 0.5
+delta-direction-weight = 0.5
+
 # =====================================================================
 # DEFENSE PARAMETERS - TWO-STAGE FILTERING
 # =====================================================================
+# Lọc hai giai đoạn:
+# - Hard Filter: Loại bỏ ngay các máy khách có ci > θ_adj_h
+# - Soft Filter: Lọc thêm dựa trên reputation thấp
+# =====================================================================
 [tool.flwr.app.config.defense.filtering]
-# Hard Filtering
+
+# Hard Filtering (k-threshold cho confidence scoring)
 hard-k-threshold = 3
 
-# Soft Filtering
+# FIX #3: Hard Threshold Range (từ PDF trang 10)
+# PDF: "θ_adj_h ∈ [0.85, 0.95] (điều chỉnh theo H)"
+hard-threshold-min = 0.85
+hard-threshold-max = 0.95
+
+# Soft Filtering (reputation-based)
 soft-reputation-threshold = 0.4
 soft-distance-multiplier = 2.0
 soft-enabled = true
@@ -147,8 +181,14 @@ soft-enabled = true
 # =====================================================================
 # DEFENSE PARAMETERS - REPUTATION SYSTEM
 # =====================================================================
+# Hệ thống danh tiếng với:
+# - Asymmetric EMA: α_down < α_up (trừng phạt nhanh, thưởng chậm)
+# - Floor Lifting: Nâng reputation từ 0.15 → 0.3 sau 5 rounds tốt
+# =====================================================================
 [tool.flwr.app.config.defense.reputation]
+
 # EMA (Exponential Moving Average)
+# PDF nói "α↓ < α↑" nhưng không cho giá trị cụ thể
 ema-alpha-increase = 0.4
 ema-alpha-decrease = 0.2
 
@@ -164,21 +204,31 @@ floor-lift-threshold = 0.4
 floor-lift-amount = 0.2
 
 # Initial Reputation
+# NOTE: PDF sơ đồ có 0.7, nhưng 0.8 có thể đã được optimize
+# Có thể test lại với 0.7 nếu muốn match 100% với sơ đồ
 initial-reputation = 0.8
 
 # =====================================================================
 # DEFENSE PARAMETERS - MODE CONTROLLER
 # =====================================================================
+# Chuyển đổi chế độ thích ứng:
+# - NORMAL (ρ ≤ 0.15): Weighted Average
+# - ALERT (0.15 < ρ ≤ 0.30): Trimmed Mean
+# - DEFENSE (ρ > 0.30): Coordinate Median
+# =====================================================================
 [tool.flwr.app.config.defense.mode]
+
 # Mode Thresholds
+# NOTE: PDF nói ρ ≤ 0.15 cho NORMAL, nhưng 0.20 có thể đã được optimize
+# Có thể test lại với 0.15 nếu muốn match 100% với PDF
 threshold-normal-to-alert = 0.20
 threshold-alert-to-defense = 0.30
 
-# Hysteresis
+# Hysteresis (tránh dao động giữa các modes)
 hysteresis-normal = 0.10
 hysteresis-defense = 0.15
 
-# Reputation Gates
+# Reputation Gates (điều kiện để chuyển vào DEFENSE)
 rep-gate-defense = 0.5
 
 # Initial Mode

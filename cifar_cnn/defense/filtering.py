@@ -20,6 +20,8 @@ class TwoStageFilter:
     
     def __init__(self,
                  hard_k_threshold: int = 3,
+                 hard_threshold_min: float = 0.85,  # NEW
+                 hard_threshold_max: float = 0.95,  # NEW
                  soft_reputation_threshold: float = 0.4,
                  soft_distance_multiplier: float = 2.0,
                  soft_enabled: bool = True):
@@ -27,18 +29,24 @@ class TwoStageFilter:
         Initialize Two-Stage Filter with configurable parameters.
         
         Args:
-            hard_k_threshold: K threshold for hard filtering (BASE value)
+            hard_k_threshold: K threshold for hard filtering
+            hard_threshold_min: Min value cho hard confidence threshold (từ PDF: 0.85)
+            hard_threshold_max: Max value cho hard confidence threshold (từ PDF: 0.95)
             soft_reputation_threshold: Reputation threshold for soft filtering (BASE value)
             soft_distance_multiplier: Distance multiplier for soft filtering
             soft_enabled: Enable/disable soft filtering
         """
         self.hard_k_threshold = hard_k_threshold
+        self.hard_threshold_min = hard_threshold_min  
+        self.hard_threshold_max = hard_threshold_max 
         self.soft_reputation_threshold = soft_reputation_threshold
         self.soft_distance_multiplier = soft_distance_multiplier
         self.soft_enabled = soft_enabled
+
         
         print(f"✅ TwoStageFilter initialized (FIXED) with params:")
-        print(f"   Hard k-threshold (base): {hard_k_threshold}")
+        print(f"   Hard k-threshold: {hard_k_threshold}")
+        print(f"   Hard threshold range: [{hard_threshold_min}, {hard_threshold_max}]")  # NEW
         print(f"   Soft rep-threshold (base): {soft_reputation_threshold}")
         print(f"   Soft distance-mult: {soft_distance_multiplier}")
         print(f"   Soft enabled: {soft_enabled}")
@@ -69,12 +77,22 @@ class TwoStageFilter:
         """
         # === FIX: Tính adaptive thresholds ===
         if noniid_handler is not None:
-            # Hard filtering threshold (cao hơn khi H cao để tránh FP)
-            base_hard_threshold = 0.7  # Confidence threshold cao = chắc chắn là xấu
+            # Hard filtering threshold
+            # Calculate base từ midpoint của range [0.85, 0.95]
+            base_hard_threshold = (self.hard_threshold_min + self.hard_threshold_max) / 2.0
+            
+            # Apply adaptive adjustment based on H
             adaptive_hard_threshold = noniid_handler.get_adaptive_threshold(
                 H=heterogeneity,
                 mode=mode,
                 base_threshold=base_hard_threshold
+            )
+            
+            # Clip to configured range [0.85, 0.95]
+            adaptive_hard_threshold = np.clip(
+                adaptive_hard_threshold,
+                self.hard_threshold_min,
+                self.hard_threshold_max
             )
             
             # Soft filtering threshold (reputation - cao hơn khi H cao)
@@ -85,9 +103,9 @@ class TwoStageFilter:
                 base_threshold=base_soft_threshold
             )
         else:
-            # Fallback: dùng base thresholds
-            print("   ⚠️  Warning: noniid_handler not provided, using base thresholds")
-            adaptive_hard_threshold = 0.7
+            # Fallback: dùng midpoint của range
+            print("   ⚠️  Warning: noniid_handler not provided, using default thresholds")
+            adaptive_hard_threshold = (self.hard_threshold_min + self.hard_threshold_max) / 2.0
             adaptive_soft_threshold = self.soft_reputation_threshold
         
         print(f"   Adaptive thresholds:")
