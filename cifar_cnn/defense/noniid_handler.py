@@ -55,37 +55,95 @@ class NonIIDHandler:
                                     gradients: List[np.ndarray],
                                     client_ids: List[int]) -> float:
         """
-        Compute heterogeneity score H.
+        Compute heterogeneity score H (FULL FORMULA from PDF).
         
         H ∈ [0, 1]:
         - H = 0: Perfectly homogeneous (IID)
         - H = 1: Highly heterogeneous (non-IID)
         
-        Formula: H = min(1.0, CV) where CV = std/mean of pairwise distances
+        FULL Formula (từ main.pdf trang 10):
+            H = 0.4 × H_CV + 0.4 × H_sim + 0.2 × H_cluster
+        
+        Components:
+        - H_CV: Coefficient of Variation của khoảng cách cặp
+        - H_sim: Độ tương đồng cosine trung bình (inverted)
+        - H_cluster: Độ phân tách cụm (Silhouette score)
         """
         n = len(gradients)
         
         if n < 2:
             return 0.0
         
-        # Compute pairwise distances
+        # Flatten gradients
         grad_matrix = np.vstack([g.flatten() for g in gradients])
         
+        # ===== Component 1: H_CV (Coefficient of Variation) =====
         distances = []
         for i in range(n):
             for j in range(i + 1, n):
                 dist = np.linalg.norm(grad_matrix[i] - grad_matrix[j])
                 distances.append(dist)
         
-        # Normalize H to [0, 1]
         if len(distances) == 0:
             return 0.0
         
         mean_dist = np.mean(distances)
         std_dist = np.std(distances)
         
-        # H = CV (Coefficient of Variation), capped at 1.0
-        H = min(1.0, std_dist / (mean_dist + 1e-10))
+        # H_CV = CV (capped at 1.0)
+        H_CV = min(1.0, std_dist / (mean_dist + 1e-10))
+        
+        # ===== Component 2: H_sim (Cosine Similarity, inverted) =====
+        # Tính độ tương đồng cosine trung bình giữa các cặp gradients
+        # High similarity → Low heterogeneity → Invert để có: high H_sim = high heterogeneity
+        cosine_sims = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dot_product = np.dot(grad_matrix[i], grad_matrix[j])
+                norm_i = np.linalg.norm(grad_matrix[i])
+                norm_j = np.linalg.norm(grad_matrix[j])
+                
+                cosine_sim = dot_product / (norm_i * norm_j + 1e-10)
+                cosine_sims.append(cosine_sim)
+        
+        mean_cosine_sim = np.mean(cosine_sims) if cosine_sims else 0.0
+        
+        # Invert: High similarity (1.0) → Low H_sim (0.0)
+        #         Low similarity (-1.0) → High H_sim (1.0)
+        # Formula: H_sim = (1 - mean_cosine_sim) / 2, capped in [0, 1]
+        H_sim = np.clip((1.0 - mean_cosine_sim) / 2.0, 0.0, 1.0)
+        
+        # ===== Component 3: H_cluster (Silhouette Score, inverted) =====
+        # Silhouette score đo độ phân tách cụm
+        # High silhouette → Well-separated clusters → High heterogeneity
+        # 
+        # Simplified approach: Tính intra-cluster vs inter-cluster distances
+        # Nếu n < 3, không thể tính meaningful clustering
+        if n < 3:
+            H_cluster = 0.0
+        else:
+            # Compute median gradient (centroid)
+            g_median = np.median(grad_matrix, axis=0)
+            
+            # Intra-cluster distance (distance to median)
+            intra_dists = [np.linalg.norm(grad_matrix[i] - g_median) for i in range(n)]
+            mean_intra = np.mean(intra_dists)
+            
+            # Inter-cluster distance (pairwise distances, reuse from H_CV)
+            mean_inter = mean_dist
+            
+            # Silhouette-like score: (inter - intra) / max(inter, intra)
+            # Range: [-1, 1], where 1 = well-separated
+            silhouette = (mean_inter - mean_intra) / (max(mean_inter, mean_intra) + 1e-10)
+            
+            # Map to [0, 1]: High silhouette → High H_cluster
+            H_cluster = np.clip((silhouette + 1.0) / 2.0, 0.0, 1.0)
+        
+        # ===== Combine with weights from PDF =====
+        H = 0.4 * H_CV + 0.4 * H_sim + 0.2 * H_cluster
+        
+        # Ensure [0, 1]
+        H = np.clip(H, 0.0, 1.0)
         
         return H
     
