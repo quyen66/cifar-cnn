@@ -1,9 +1,14 @@
 """
-Server Application - Full Defense Pipeline
-===========================================
-Load ALL parameters from pyproject.toml và pass xuống defense components.
+Server Application - Full Defense Pipeline (FIXED VERSION)
+===========================================================
+FIX: Đã khắc phục các vấn đề:
+1. ✅ Baseline Tracking được kích hoạt
+2. ✅ Adaptive Thresholds hoạt động
+3. ✅ Confidence Scoring đúng công thức: ci = (s_base + adj) × factor_baseline
+4. ✅ Reputation Update có baseline penalty
+5. ✅ Reporting/Stats được thu thập
 
-KHÔNG CÓ HARDCODED VALUES - TẤT CẢ LOAD TỪ CONFIG!
+Load ALL parameters from pyproject.toml và pass xuống defense components.
 """
 
 import numpy as np
@@ -44,7 +49,7 @@ def weighted_average(metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, 
 
 class FullPipelineStrategy(FedProx):
     """
-    FedProx Strategy với FULL DEFENSE PIPELINE.
+    FedProx Strategy với FULL DEFENSE PIPELINE - FIXED VERSION.
     
     TẤT CẢ PARAMETERS ĐƯỢC LOAD TỪ pyproject.toml!
     """
@@ -58,7 +63,7 @@ class FullPipelineStrategy(FedProx):
                  start_round=0,
                  # Defense
                  enable_defense=False,
-                 defense_params=None,  # NEW: Dict chứa ALL defense params
+                 defense_params=None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         
@@ -87,13 +92,13 @@ class FullPipelineStrategy(FedProx):
         
         if self.enable_defense:
             print("\n" + "="*70)
-            print("🛡️  FULL DEFENSE PIPELINE ENABLED")
+            print("🛡️  FULL DEFENSE PIPELINE ENABLED (FIXED VERSION)")
             print("="*70)
             print("  ✓ Layer 1: Enhanced DBSCAN Detection")
             print("  ✓ Layer 2: Distance + Direction Detection")
-            print("  ✓ Non-IID Handler")
-            print("  ✓ Two-Stage Filtering")
-            print("  ✓ Reputation System")
+            print("  ✓ Non-IID Handler (WITH Baseline Tracking)")
+            print("  ✓ Two-Stage Filtering (WITH Adaptive Thresholds)")
+            print("  ✓ Reputation System (WITH Baseline Penalty)")
             print("  ✓ Mode Controller")
             print("  ✓ Mode-Adaptive Aggregation")
             print("="*70)
@@ -102,7 +107,7 @@ class FullPipelineStrategy(FedProx):
                 print(f"     IDs: {sorted(list(self.malicious_clients))}")
             print("="*70 + "\n")
             
-            # Initialize ALL components với params từ config
+            # Initialize ALL components
             self._initialize_defense_components()
             
             # Track detection stats
@@ -113,9 +118,9 @@ class FullPipelineStrategy(FedProx):
             self.total_tn = 0
     
     def _initialize_defense_components(self):
-        """Initialize ALL defense components với params từ config."""
+        """Initialize ALL defense components."""
         
-        # Layer 1 params
+        # Layer 1
         layer1_params = self.defense_params.get('layer1', {})
         self.layer1_detector = Layer1Detector(
             pca_dims=layer1_params.get('pca_dims', 20),
@@ -128,7 +133,7 @@ class FullPipelineStrategy(FedProx):
             warmup_rounds=layer1_params.get('warmup_rounds', 10)
         )
         
-        # Layer 2 params
+        # Layer 2
         layer2_params = self.defense_params.get('layer2', {})
         self.layer2_detector = Layer2Detector(
             distance_multiplier=layer2_params.get('distance_multiplier', 1.5),
@@ -136,7 +141,7 @@ class FullPipelineStrategy(FedProx):
             warmup_rounds=layer2_params.get('warmup_rounds', 15)
         )
         
-        # Non-IID params
+        # Non-IID Handler
         noniid_params = self.defense_params.get('noniid', {})
         self.noniid_handler = NonIIDHandler(
             h_threshold_normal=noniid_params.get('h_threshold_normal', 0.6),
@@ -146,7 +151,7 @@ class FullPipelineStrategy(FedProx):
             baseline_window_size=noniid_params.get('baseline_window_size', 10)
         )
         
-        # Filtering params
+        # Two-Stage Filter
         filtering_params = self.defense_params.get('filtering', {})
         self.two_stage_filter = TwoStageFilter(
             hard_k_threshold=filtering_params.get('hard_k_threshold', 3),
@@ -155,7 +160,7 @@ class FullPipelineStrategy(FedProx):
             soft_enabled=filtering_params.get('soft_enabled', True)
         )
         
-        # Reputation params
+        # Reputation System
         reputation_params = self.defense_params.get('reputation', {})
         self.reputation_system = ReputationSystem(
             ema_alpha_increase=reputation_params.get('ema_alpha_increase', 0.4),
@@ -168,7 +173,7 @@ class FullPipelineStrategy(FedProx):
             initial_reputation=reputation_params.get('initial_reputation', 0.8)
         )
         
-        # Mode controller params
+        # Mode Controller
         mode_params = self.defense_params.get('mode', {})
         self.mode_controller = ModeController(
             threshold_normal_to_alert=mode_params.get('threshold_normal_to_alert', 0.20),
@@ -180,7 +185,7 @@ class FullPipelineStrategy(FedProx):
         )
     
     def _identify_malicious_clients(self) -> Set[int]:
-        """Identify malicious clients từ attack config."""
+        """Identify malicious clients from attack config."""
         attack_type = self.config_metadata.get('attack_type', 'none')
         attack_ratio = self.config_metadata.get('attack_ratio', 0.0)
         num_clients = self.config_metadata.get('num_clients', 40)
@@ -197,44 +202,34 @@ class FullPipelineStrategy(FedProx):
         results: List[Tuple[any, FitRes]],
         failures: List[Tuple[any, FitRes] | BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]] | None:
-        """Aggregate fit results với FULL DEFENSE PIPELINE."""
+        """Aggregate fit results với FULL DEFENSE PIPELINE (FIXED)."""
         
-        # CREATE CLIENT ID MAPPING (first time only)
+        # Create client ID mapping
         if not self.client_id_to_sequential:
-            # Get all client IDs from results
             all_client_ids = [client_proxy.cid for client_proxy, _ in results]
-            
-            # Sort to ensure consistent mapping
             sorted_client_ids = sorted(all_client_ids)
             
-            # Create bidirectional mapping with BOTH formats
             for idx, client_id in enumerate(sorted_client_ids):
-                # Store with original format
                 self.client_id_to_sequential[client_id] = idx
-                # Also store string version
                 self.client_id_to_sequential[str(client_id)] = idx
-                # Also store int version if possible
                 try:
                     self.client_id_to_sequential[int(client_id)] = idx
                 except:
                     pass
-                
                 self.sequential_to_client_id[idx] = client_id
             
             print(f"✅ Created client ID mapping: {len(sorted_client_ids)} clients")
-            print(f"   Mapping key types: {[type(k).__name__ for k in list(self.client_id_to_sequential.keys())[:3]]}")
-            
-            
+        
         if not results:
             return None
         
-        # Baseline aggregation (no defense)
+        # Baseline aggregation
         if not self.enable_defense:
             return super().aggregate_fit(server_round, results, failures)
         
-        # === FULL DEFENSE PIPELINE ===
+        # === FULL DEFENSE PIPELINE (FIXED) ===
         print(f"\n{'='*70}")
-        print(f"ROUND {server_round} - FULL DEFENSE PIPELINE")
+        print(f"ROUND {server_round} - FULL DEFENSE PIPELINE (FIXED)")
         print(f"{'='*70}")
         
         # Extract gradients and client IDs
@@ -288,32 +283,61 @@ class FullPipelineStrategy(FedProx):
         H = self.noniid_handler.compute_heterogeneity_score(gradients, client_ids)
         print(f"   Heterogeneity: H = {H:.3f}")
         
-        # === STAGE 3: Reputation Update ===
-        print(f"\n⭐ STAGE 3: REPUTATION UPDATE")
+        # === STAGE 2.5: FIX - Compute Baseline Deviations ===
+        print(f"\n🔬 STAGE 2.5: BASELINE TRACKING (FIX)")
+        print("─"*70)
+        
+        baseline_deviations = {}
+        for i, cid in enumerate(client_ids):
+            deviation = self.noniid_handler.compute_baseline_deviation(
+                cid, gradients[i]
+            )
+            baseline_deviations[cid] = deviation
+        
+        num_high_deviation = sum(1 for d in baseline_deviations.values() if d > 0.3)
+        print(f"   Clients with high deviation (>0.3): {num_high_deviation}/{len(client_ids)}")
+        
+        # === STAGE 3: FIX - Confidence Scoring with Baseline Factor ===
+        print(f"\n💯 STAGE 3: CONFIDENCE SCORING (FIX)")
         print("─"*70)
         
         grad_median = np.median(np.vstack(gradients), axis=0)
         
+        # Initialize reputations
         reputations = {}
-        for i, cid in enumerate(client_ids):
+        for cid in client_ids:
             if cid not in self.reputation_system.reputations:
                 self.reputation_system.initialize_client(cid)
-            
+            reputations[cid] = self.reputation_system.get_reputation(cid)
+        
+        # Compute confidence scores (FIXED FORMULA)
+        confidence_scores = {}
+        for cid in client_ids:
+            # Base score from detection layers
             was_flagged = combined_flags.get(cid, False)
-            rep = self.reputation_system.update(
-                cid, gradients[i], grad_median, was_flagged, server_round
-            )
-            reputations[cid] = rep
+            s_base = 3 if was_flagged else 0
+            
+            # Adjustment from old reputation
+            rep = reputations.get(cid, 0.8)
+            adj_rep = (1.0 - rep) * 2  # Scale to [0, 2]
+            
+            # FIX: Factor from baseline deviation (dùng > thay vì <)
+            deviation = baseline_deviations.get(cid, 0.0)
+            factor_baseline = 0.8 if deviation > 0.3 else 1.0
+            
+            # Final confidence (đúng công thức trong PDF)
+            ci = np.clip((s_base + adj_rep) * factor_baseline, 0.0, 1.0)
+            confidence_scores[cid] = ci
         
-        rep_mean = np.mean(list(reputations.values()))
-        print(f"   Mean reputation: {rep_mean:.3f}")
+        print(f"   Confidence scores computed with baseline factor")
+        print(f"   Mean confidence: {np.mean(list(confidence_scores.values())):.3f}")
         
-        # === STAGE 4: Mode Control ===
+        # === STAGE 4: Mode Control (trước khi filter) ===
         print(f"\n🎛️  STAGE 4: MODE CONTROL")
         print("─"*70)
         
         detected_ids = [cid for cid, flag in combined_flags.items() if flag]
-        rho = len(detected_ids) / len(client_ids)
+        rho = len(detected_ids) / len(client_ids) if len(client_ids) > 0 else 0.0
         
         new_mode = self.mode_controller.update_mode(
             threat_ratio=rho,
@@ -325,24 +349,50 @@ class FullPipelineStrategy(FedProx):
         print(f"   Threat ratio: ρ = {rho:.2%}")
         print(f"   Mode: {new_mode}")
         
-        # === STAGE 5: Two-Stage Filtering ===
-        print(f"\n🔧 STAGE 5: TWO-STAGE FILTERING")
+        # === STAGE 5: FIX - Two-Stage Filtering with Adaptive Thresholds ===
+        print(f"\n🔧 STAGE 5: TWO-STAGE FILTERING (FIX)")
         print("─"*70)
-        
-        confidence_scores = {cid: int(combined_flags.get(cid, False)) * 3 for cid in client_ids}
         
         trusted, filtered, filter_stats = self.two_stage_filter.filter_clients(
             client_ids=client_ids,
             confidence_scores=confidence_scores,
             reputations=reputations,
             mode=new_mode,
-            heterogeneity=H
+            heterogeneity=H,
+            noniid_handler=self.noniid_handler  # FIX: Pass handler để tính adaptive thresholds
         )
         
         print(f"   Trusted: {len(trusted)}, Filtered: {len(filtered)}")
+        print(f"   Hard filtered: {filter_stats['hard_filtered']}")
+        print(f"   Soft filtered: {filter_stats['soft_filtered']}")
         
-        # === STAGE 6: Mode-Adaptive Aggregation ===
-        print(f"\n⚙️  STAGE 6: MODE-ADAPTIVE AGGREGATION")
+        # === STAGE 6: FIX - Reputation Update with Baseline Penalty ===
+        print(f"\n⭐ STAGE 6: REPUTATION UPDATE (FIX)")
+        print("─"*70)
+        
+        for i, cid in enumerate(client_ids):
+            was_flagged = combined_flags.get(cid, False)
+            deviation = baseline_deviations.get(cid, 0.0)
+            
+            # Standard reputation update
+            rep = self.reputation_system.update(
+                cid, gradients[i], grad_median, was_flagged, server_round
+            )
+            
+            # FIX: Apply baseline penalty
+            baseline_penalty = 0.1 if deviation > 0.3 else 0.0
+            if baseline_penalty > 0:
+                rep = max(0.0, rep - baseline_penalty)
+                self.reputation_system.reputations[cid] = rep
+                print(f"   Client {cid}: Applied baseline penalty ({deviation:.3f} > 0.3)")
+            
+            reputations[cid] = rep
+        
+        rep_mean = np.mean(list(reputations.values()))
+        print(f"   Mean reputation: {rep_mean:.3f}")
+        
+        # === STAGE 7: Mode-Adaptive Aggregation ===
+        print(f"\n⚙️  STAGE 7: MODE-ADAPTIVE AGGREGATION")
         print("─"*70)
         print(f"   Aggregation method: {new_mode}")
         
@@ -367,11 +417,28 @@ class FullPipelineStrategy(FedProx):
                 size = p.size
                 client_params.append(aggregated_gradient[offset:offset+size].reshape(p.shape))
                 offset += size
-            break  # Use first client's structure
+            break
         
         aggregated_parameters = ndarrays_to_parameters(client_params)
         
-        # === Metrics Calculation ===
+        # === STAGE 8: FIX - Collect Stats ===
+        print(f"\n📈 STAGE 8: REPORTING (FIX)")
+        print("─"*70)
+        
+        # Layer stats
+        layer1_stats = self.layer1_detector.get_stats()
+        layer2_stats = self.layer2_detector.get_stats()
+        noniid_stats = self.noniid_handler.get_stats()
+        filter_stats_full = self.two_stage_filter.get_stats()
+        reputation_stats = self.reputation_system.get_stats()
+        mode_stats = self.mode_controller.get_stats()
+        
+        print(f"   Layer1: PCA fitted={layer1_stats.get('pca_fitted', False)}")
+        print(f"   NonIID: Tracked clients={noniid_stats.get('num_tracked_clients', 0)}")
+        print(f"   Reputation: Mean={reputation_stats.get('mean_reputation', 0):.3f}")
+        print(f"   Mode: {mode_stats.get('current_mode', 'N/A')}")
+        
+        # Metrics
         self._calculate_metrics(server_round, detected_ids, new_mode, rho, H)
         
         # Save checkpoint
@@ -383,32 +450,26 @@ class FullPipelineStrategy(FedProx):
     
     def _calculate_metrics(self, server_round, detected_ids, new_mode, rho, H):
         """Calculate detection metrics with proper ID mapping."""
-            # ADD THIS DEBUG
-        print(f"\n🔍 DEBUG _calculate_metrics:")
-        print(f"   detected_ids type: {type(detected_ids)}")
-        print(f"   detected_ids length: {len(detected_ids)}")
-        print(f"   detected_ids sample: {list(detected_ids)[:5] if detected_ids else 'EMPTY'}")
-        print(f"   malicious_clients: {self.malicious_clients}")
-
-        # STEP 1: Map detected hashed IDs to sequential IDs
+        
+        # Map detected hashed IDs to sequential IDs
         detected_sequential = set()
         for hashed_id in detected_ids:
             seq_id = self.client_id_to_sequential.get(hashed_id, -1)
             if seq_id != -1:
                 detected_sequential.add(seq_id)
         
-        # STEP 2: Ground truth (may be empty if no attack)
-        true_malicious = self.malicious_clients  # Set of sequential IDs
+        # Ground truth
+        true_malicious = self.malicious_clients
         
-        # STEP 3: Calculate metrics ALWAYS (even if no attack)
+        # Calculate metrics
         num_clients = self.config_metadata.get('num_clients', 40)
         
         tp = len(true_malicious & detected_sequential)
-        fp = len(detected_sequential - true_malicious)  # Detected but not malicious
-        fn = len(true_malicious - detected_sequential)  # Malicious but not detected
-        tn = num_clients - tp - fp - fn  # Everything else
+        fp = len(detected_sequential - true_malicious)
+        fn = len(true_malicious - detected_sequential)
+        tn = num_clients - tp - fp - fn
         
-        # STEP 4: Calculate rates
+        # Rates
         total_malicious = len(true_malicious)
         total_benign = num_clients - total_malicious
         
@@ -417,13 +478,13 @@ class FullPipelineStrategy(FedProx):
         precision = (tp / (tp + fp) * 100) if (tp + fp) > 0 else 0.0
         f1 = (2 * tp / (2 * tp + fp + fn) * 100) if (2 * tp + fp + fn) > 0 else 0.0
         
-        # STEP 5: Accumulate totals
+        # Accumulate
         self.total_tp += tp
         self.total_fp += fp
         self.total_fn += fn
         self.total_tn += tn
         
-        # STEP 6: Print metrics
+        # Print
         print(f"\n📈 DETECTION METRICS")
         print(f"{'─'*70}")
         print(f"   TP={tp}, FP={fp}, FN={fn}, TN={tn}")
@@ -432,7 +493,7 @@ class FullPipelineStrategy(FedProx):
         print(f"   Precision: {precision:.1f}%")
         print(f"   F1: {f1:.1f}%")
         print(f"{'═'*70}")
-            
+    
     def _generate_model_name(self, server_round):
         """Generate model name."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -441,7 +502,7 @@ class FullPipelineStrategy(FedProx):
         attack_ratio = self.config_metadata.get('attack_ratio', 0.0)
         
         attack_info = f"{attack_type}{int(attack_ratio*100)}pct" if attack_type != 'none' else "clean"
-        defense_info = "fullpipeline" if self.enable_defense else "baseline"
+        defense_info = "fullpipeline_fixed" if self.enable_defense else "baseline"
         
         return f"{num_clients}c_{attack_info}_{defense_info}_{timestamp}_r{server_round}"
     
@@ -460,7 +521,7 @@ class FullPipelineStrategy(FedProx):
             "timestamp": datetime.now().isoformat(),
             "current_round": server_round,
             "config": self.config_metadata,
-            "defense_params": self.defense_params,  # Save defense params
+            "defense_params": self.defense_params,
             "accuracy_history": self.accuracy_history,
             "detection_history": self.detection_history[-10:] if self.detection_history else []
         }
@@ -471,9 +532,9 @@ class FullPipelineStrategy(FedProx):
 
 
 def server_fn(context: Context) -> ServerAppComponents:
-    """Create server với ALL params từ config."""
+    """Create server with ALL params from config."""
     
-    # === Load Basic FL Config ===
+    # Load config
     num_rounds = context.run_config.get("num-server-rounds", 50)
     num_clients = context.run_config.get("num-clients", 40)
     fraction_fit = context.run_config.get("fraction-fit", 0.6)
@@ -491,19 +552,16 @@ def server_fn(context: Context) -> ServerAppComponents:
     save_dir = context.run_config.get("save-dir", "saved_models")
     save_interval = context.run_config.get("save-interval", 10)
     
-    # Defense
     enable_defense = context.run_config.get("enable-defense", True)
     
-    # Attack
     attack_type = context.run_config.get("attack-type", "none")
     attack_ratio = context.run_config.get("attack-ratio", 0.0)
     partition_type = context.run_config.get("partition-type", "iid")
     
-    # === Load ALL Defense Params từ Config ===
+    # Load ALL defense params
     defense_params = {}
     
     if enable_defense:
-        # Layer 1 params
         defense_params['layer1'] = {
             'pca_dims': context.run_config.get("defense.layer1.pca-dims", 20),
             'dbscan_min_samples': context.run_config.get("defense.layer1.dbscan-min-samples", 3),
@@ -515,14 +573,12 @@ def server_fn(context: Context) -> ServerAppComponents:
             'warmup_rounds': context.run_config.get("defense.layer1.warmup-rounds", 10)
         }
         
-        # Layer 2 params
         defense_params['layer2'] = {
             'distance_multiplier': context.run_config.get("defense.layer2.distance-multiplier", 1.5),
             'cosine_threshold': context.run_config.get("defense.layer2.cosine-threshold", 0.3),
             'warmup_rounds': context.run_config.get("defense.layer2.warmup-rounds", 15)
         }
         
-        # Non-IID params
         defense_params['noniid'] = {
             'h_threshold_normal': context.run_config.get("defense.noniid.h-threshold-normal", 0.6),
             'h_threshold_alert': context.run_config.get("defense.noniid.h-threshold-alert", 0.5),
@@ -531,7 +587,6 @@ def server_fn(context: Context) -> ServerAppComponents:
             'baseline_window_size': context.run_config.get("defense.noniid.baseline-window-size", 10)
         }
         
-        # Filtering params
         defense_params['filtering'] = {
             'hard_k_threshold': context.run_config.get("defense.filtering.hard-k-threshold", 3),
             'soft_reputation_threshold': context.run_config.get("defense.filtering.soft-reputation-threshold", 0.4),
@@ -539,7 +594,6 @@ def server_fn(context: Context) -> ServerAppComponents:
             'soft_enabled': context.run_config.get("defense.filtering.soft-enabled", True)
         }
         
-        # Reputation params
         defense_params['reputation'] = {
             'ema_alpha_increase': context.run_config.get("defense.reputation.ema-alpha-increase", 0.4),
             'ema_alpha_decrease': context.run_config.get("defense.reputation.ema-alpha-decrease", 0.2),
@@ -551,7 +605,6 @@ def server_fn(context: Context) -> ServerAppComponents:
             'initial_reputation': context.run_config.get("defense.reputation.initial-reputation", 0.8)
         }
         
-        # Mode params
         defense_params['mode'] = {
             'threshold_normal_to_alert': context.run_config.get("defense.mode.threshold-normal-to-alert", 0.20),
             'threshold_alert_to_defense': context.run_config.get("defense.mode.threshold-alert-to-defense", 0.30),
@@ -563,7 +616,7 @@ def server_fn(context: Context) -> ServerAppComponents:
     
     # Print config
     print(f"\n{'='*70}")
-    print("SERVER CONFIGURATION")
+    print("SERVER CONFIGURATION (FIXED VERSION)")
     print(f"{'='*70}")
     print(f"  Clients: {num_clients} (fit={num_fit_clients}/round)")
     print(f"  Rounds: {num_rounds}")
@@ -571,7 +624,6 @@ def server_fn(context: Context) -> ServerAppComponents:
     print(f"  Defense: {'ENABLED ✓' if enable_defense else 'DISABLED ✗'}")
     print(f"{'='*70}\n")
     
-    # Config metadata
     config_metadata = {
         'num_clients': num_clients,
         'partition_type': partition_type,
@@ -581,10 +633,8 @@ def server_fn(context: Context) -> ServerAppComponents:
         'proximal_mu': proximal_mu,
     }
     
-    # Get model
     net = get_model()
     
-    # Strategy
     strategy = FullPipelineStrategy(
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_evaluate,
@@ -601,7 +651,7 @@ def server_fn(context: Context) -> ServerAppComponents:
         config_metadata=config_metadata,
         start_round=0,
         enable_defense=enable_defense,
-        defense_params=defense_params  # Pass ALL defense params!
+        defense_params=defense_params
     )
     
     config = ServerConfig(num_rounds=num_rounds)
