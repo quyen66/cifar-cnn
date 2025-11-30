@@ -101,6 +101,7 @@ def client_fn(context: Context) -> Client:
     learning_rate = context.run_config["learning-rate"]
     use_mixed_precision = context.run_config.get("use-mixed-precision", True)
     partition_type = context.run_config.get("partition-type", "iid")
+    alpha = context.run_config.get("alpha", 0.5)
     
     # FedProx parameter
     proximal_mu = context.run_config.get("proximal-mu", 0.005)
@@ -115,7 +116,7 @@ def client_fn(context: Context) -> Client:
     
     # Load data with GPU optimization
     trainloader, testloader = prepare_datasets(
-        client_id, num_clients, batch_size, partition_type,
+        client_id, num_clients, batch_size, partition_type, alpha=alpha,
         num_workers=num_workers, pin_memory=pin_memory
     )
     

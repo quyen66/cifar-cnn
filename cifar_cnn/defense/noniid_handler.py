@@ -22,14 +22,17 @@ class NonIIDHandler:
     """Non-IID handler với configurable parameters (VERIFIED)."""
     
     def __init__(self,
-                 h_threshold_normal: float = 0.6,
-                 h_threshold_alert: float = 0.5,
-                 adaptive_multiplier: float = 1.5,
-                 adjustment_factor: float = 0.4,  
-                 baseline_percentile: int = 60,
-                 baseline_window_size: int = 10,
-                 delta_norm_weight: float = 0.5,  
-                 delta_direction_weight: float = 0.5):  
+             h_threshold_normal: float = 0.6,
+             h_threshold_alert: float = 0.5,
+             adaptive_multiplier: float = 1.5,
+             adjustment_factor: float = 0.4,
+             baseline_percentile: int = 60,
+             baseline_window_size: int = 10,
+             delta_norm_weight: float = 0.5,
+             delta_direction_weight: float = 0.5,
+             weight_cv: float = 0.4,           
+             weight_sim: float = 0.4,          
+             weight_cluster: float = 0.2): 
         """
         Initialize Non-IID Handler with configurable parameters.
         
@@ -42,6 +45,9 @@ class NonIIDHandler:
             baseline_window_size: Window size for gradient history
             delta_norm_weight: Weight cho norm deviation trong δi calculation
             delta_direction_weight: Weight cho direction deviation trong δi calculation
+            weight_cv: Weight for H_CV component in H score
+            weight_sim: Weight for H_sim component in H score
+            weight_cluster: Weight for H_cluster component in H score
         """
         self.h_threshold_normal = h_threshold_normal
         self.h_threshold_alert = h_threshold_alert
@@ -51,14 +57,26 @@ class NonIIDHandler:
         self.baseline_window_size = baseline_window_size
         self.delta_norm_weight = delta_norm_weight  
         self.delta_direction_weight = delta_direction_weight  
-        
+        self.weight_cv = weight_cv
+        self.weight_sim = weight_sim
+        self.weight_cluster = weight_cluster
+
+        # Validate H weights sum to 1.0
+        h_weight_sum = weight_cv + weight_sim + weight_cluster
+        if abs(h_weight_sum - 1.0) > 1e-6:
+            raise ValueError(
+                f"H weights must sum to 1.0, got {h_weight_sum:.6f} "
+                f"(cv={weight_cv}, sim={weight_sim}, cluster={weight_cluster})"
+            )
+            
         # Client gradient history
         self.client_gradients = {}
         
-        print(f"✅ NonIIDHandler initialized (FIXED) with params:")
+        print(f"✅ NonIIDHandler initialized with params:")
+        print(f"   H weights: CV={weight_cv}, sim={weight_sim}, cluster={weight_cluster}")
         print(f"   H thresholds: normal={h_threshold_normal}, alert={h_threshold_alert}")
         print(f"   Adaptive multiplier: {adaptive_multiplier}")
-        print(f"   Adjustment factor: {adjustment_factor}") 
+        print(f"   Adjustment factor: {adjustment_factor}")
         print(f"   Baseline: percentile={baseline_percentile}, window={baseline_window_size}")
         print(f"   Delta weights: norm={delta_norm_weight}, direction={delta_direction_weight}")
     
@@ -151,7 +169,7 @@ class NonIIDHandler:
             H_cluster = np.clip((silhouette + 1.0) / 2.0, 0.0, 1.0)
         
         # ===== Combine with weights from PDF =====
-        H = 0.4 * H_CV + 0.4 * H_sim + 0.2 * H_cluster
+        H = self.weight_cv * H_CV + self.weight_sim * H_sim + self.weight_cluster
         
         # Ensure [0, 1]
         H = np.clip(H, 0.0, 1.0)
@@ -326,6 +344,9 @@ class NonIIDHandler:
     def get_stats(self) -> Dict:
         """Get handler statistics."""
         return {
+            'weight_cv': self.weight_cv,
+            'weight_sim': self.weight_sim,
+            'weight_cluster': self.weight_cluster,
             'h_threshold_normal': self.h_threshold_normal,
             'h_threshold_alert': self.h_threshold_alert,
             'adaptive_multiplier': self.adaptive_multiplier,

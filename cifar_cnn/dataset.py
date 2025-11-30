@@ -47,6 +47,32 @@ def create_iid_partitions(dataset, num_clients):
     
     return client_indices
 
+def create_dirichlet_partitions(dataset, num_clients, alpha=0.5, num_classes=10):
+    """Chia dữ liệu theo phân phối Dirichlet (LDA)."""
+    labels = np.array(dataset.targets)
+    client_idcs = [[] for _ in range(num_clients)]
+    
+    # Với mỗi class, chia các sample cho các client theo tỷ lệ Dirichlet
+    for c in range(num_classes):
+        idx_k = np.where(labels == c)[0]
+        np.random.shuffle(idx_k)
+        
+        # Sinh tỷ lệ phân chia (proportions)
+        proportions = np.random.dirichlet(np.repeat(alpha, num_clients))
+        
+        # Cân bằng lại để tránh client không có dữ liệu (có thể tinh chỉnh thêm)
+        proportions = np.array([p * (len(idx_j) < len(labels) / num_clients) for p, idx_j in zip(proportions, client_idcs)])
+        proportions = proportions / proportions.sum()
+        
+        # Tính điểm cắt index
+        proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
+        
+        # Chia và gán
+        client_splits = np.split(idx_k, proportions)
+        for client_idx, split in enumerate(client_splits):
+            client_idcs[client_idx].extend(split)
+
+    return client_idcs
 
 def create_non_iid_partitions(dataset, num_clients, num_classes=10, classes_per_client=2):
     class_indices = {i: [] for i in range(num_classes)}
@@ -95,7 +121,7 @@ def get_client_dataloader(dataset, client_indices, batch_size=32, is_train=True,
     )
 
 
-def prepare_datasets(client_id, num_clients, batch_size=32, partition_type="iid",
+def prepare_datasets(client_id, num_clients, batch_size=32, partition_type="iid", alpha=0.5,
                     num_workers=4, pin_memory=True):
     """
     Prepare datasets for a client - FIXED to handle dynamic client_id.
@@ -116,6 +142,11 @@ def prepare_datasets(client_id, num_clients, batch_size=32, partition_type="iid"
     # Create partitions based on num_clients
     if partition_type == "iid":
         train_partitions = create_iid_partitions(trainset, num_clients)
+        test_partitions = create_iid_partitions(testset, num_clients)
+    elif partition_type == "dirichlet": 
+        # Lưu ý: Thường chỉ cần chia Train set là Non-IID, Test set có thể giữ IID hoặc chia theo
+        train_partitions = create_dirichlet_partitions(trainset, num_clients, alpha=alpha)
+        # Test set có thể chia tương tự hoặc dùng IID tùy thiết kế của bạn
         test_partitions = create_iid_partitions(testset, num_clients)
     else:
         train_partitions = create_non_iid_partitions(trainset, num_clients, classes_per_client=2)

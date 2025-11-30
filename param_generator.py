@@ -1,288 +1,247 @@
 #!/usr/bin/env python3
 """
-Generate Focused Aggressive Parameter Suite
-===========================================
+H Weights Dense Grid Generator
+===============================
 
-Focused search targeting Grade A with ~200 configs.
-Based on Rank #1 and #3 patterns with more aggressive tuning.
+Generate dense grid of H weight combinations for thorough optimization.
 
-Target: Detection 75-82%, FPR 5-8%, F1 75-80%
-
+Options:
+    --grid-step: Grid spacing (default: 0.05 for ~80 configs)
+    --min-value: Minimum value for any weight (default: 0.1)
+    
 Usage:
-    python generate_focused_aggressive.py
+    python3 generate_h_weights_dense.py --grid-step 0.05
+    python3 generate_h_weights_dense.py --grid-step 0.1    # Faster, ~30 configs
 """
 
 import json
-import itertools
+import argparse
 from datetime import datetime
+from typing import List, Dict, Tuple
 
 
-# ============================================================================
-# FOCUSED AGGRESSIVE PARAMETERS
-# ============================================================================
-# Based on successful patterns from current Grade B configs
-# Rank #1: mad_k=3.0, vote=1, dbscan_min=6, eps=1.2, Detection 58%
-# Rank #3: mad_k=4.0, vote=3, dbscan_min=3, eps=1.0, Detection 58%
-
-# Strategy: Even MORE aggressive than Grade B winners
-
-LAYER1_CONFIGS = {
-    'pca_dims': [20, 25],
+class DenseHWeightGenerator:
+    """Generate dense grid of H weight combinations."""
     
-    # MAD - Even lower than Grade B winners (3.0, 4.0)
-    'mad_k_normal': [2.5, 3.0, 3.5],
-    'mad_k_warmup': [4.5, 5.0],
+    def __init__(self, grid_step: float = 0.05, min_value: float = 0.1):
+        """
+        Initialize generator.
+        
+        Args:
+            grid_step: Step size for grid (0.05 or 0.1)
+            min_value: Minimum allowed value for any weight
+        """
+        self.grid_step = grid_step
+        self.min_value = min_value
+        
+        # Generate all valid combinations
+        self.combinations = self._generate_combinations()
+        
+        print(f"✅ Generated {len(self.combinations)} valid combinations")
+        print(f"   Grid step: {grid_step}")
+        print(f"   Min value: {min_value}")
+        print()
     
-    # Voting - Very low (Grade B had 1, 3)
-    'voting_threshold_normal': [1, 2],
-    'voting_threshold_warmup': [3, 4],
+    def _generate_combinations(self) -> List[Tuple[float, float, float]]:
+        """
+        Generate all valid (cv, sim, cluster) combinations.
+        
+        Constraints:
+        1. cv + sim + cluster = 1.0
+        2. All values >= min_value
+        3. All values are multiples of grid_step
+        """
+        combinations = []
+        
+        # Generate grid points
+        max_value = 1.0 - 2 * self.min_value
+        grid_points = []
+        value = self.min_value
+        while value <= max_value:
+            grid_points.append(round(value, 2))
+            value += self.grid_step
+        
+        # Try all cv, sim combinations
+        for cv in grid_points:
+            for sim in grid_points:
+                # Calculate cluster
+                cluster = round(1.0 - cv - sim, 2)
+                
+                # Check constraints
+                if cluster >= self.min_value and cluster <= max_value:
+                    # Verify sum = 1.0 (handle floating point)
+                    total = cv + sim + cluster
+                    if abs(total - 1.0) < 1e-6:
+                        combinations.append((cv, sim, cluster))
+        
+        return combinations
     
-    # DBSCAN - Balance between Grade B winners
-    'dbscan_min_samples': [3, 4, 5],
-    'dbscan_eps_multiplier': [1.0, 1.1, 1.2],
+    def _get_profile_name(self, cv: float, sim: float, cluster: float) -> str:
+        """Get descriptive profile name."""
+        
+        # Check if PDF default
+        if abs(cv - 0.4) < 0.01 and abs(sim - 0.4) < 0.01 and abs(cluster - 0.2) < 0.01:
+            return "pdf_default"
+        
+        # Find dominant component
+        max_weight = max(cv, sim, cluster)
+        
+        if max_weight == cv and cv >= 0.45:
+            return "cv_emphasis"
+        elif max_weight == sim and sim >= 0.45:
+            return "sim_emphasis"
+        elif max_weight == cluster and cluster >= 0.35:
+            return "cluster_emphasis"
+        elif abs(cv - sim) < 0.1 and abs(cv - cluster) < 0.1:
+            return "balanced"
+        else:
+            return "mixed"
     
-    'warmup_rounds': [12, 15],
-}
-# Total: 2 * 3 * 2 * 2 * 2 * 3 * 3 * 2 = 864 configs
-
-# To reduce to ~200, sample strategically
-LAYER1_SAMPLED = [
-    # Group 1: Very aggressive (mad_k low, vote low)
-    {'pca_dims': 20, 'mad_k_normal': 2.5, 'mad_k_warmup': 4.5, 
-     'voting_threshold_normal': 1, 'voting_threshold_warmup': 3,
-     'dbscan_min_samples': 3, 'dbscan_eps_multiplier': 1.0, 'warmup_rounds': 12},
+    def generate_suite(self) -> Dict:
+        """Generate complete parameter suite."""
+        
+        configs = []
+        
+        for idx, (cv, sim, cluster) in enumerate(self.combinations, 1):
+            config = {
+                'config_id': idx,
+                'weight_cv': cv,
+                'weight_sim': sim,
+                'weight_cluster': cluster,
+                'profile': self._get_profile_name(cv, sim, cluster)
+            }
+            configs.append(config)
+        
+        suite = {
+            'metadata': {
+                'generator': 'generate_h_weights_dense.py',
+                'version': '2.0.0',
+                'timestamp': datetime.now().isoformat(),
+                'total_configs': len(configs),
+                'optimization_phase': 'Phase 1 - H Weights Dense Grid',
+                'grid_step': self.grid_step,
+                'min_value': self.min_value,
+                'fixed_params': {
+                    'h_threshold_normal': 0.6,
+                    'h_threshold_alert': 0.5,
+                    'adjustment_factor': 0.4,
+                    'baseline_percentile': 60,
+                    'baseline_window_size': 10,
+                    'delta_norm_weight': 0.5,
+                    'delta_direction_weight': 0.5
+                }
+            },
+            'suite': {
+                'h_weights': configs
+            }
+        }
+        
+        return suite
     
-    {'pca_dims': 20, 'mad_k_normal': 2.5, 'mad_k_warmup': 4.5,
-     'voting_threshold_normal': 1, 'voting_threshold_warmup': 3,
-     'dbscan_min_samples': 3, 'dbscan_eps_multiplier': 1.2, 'warmup_rounds': 12},
-    
-    {'pca_dims': 20, 'mad_k_normal': 2.5, 'mad_k_warmup': 5.0,
-     'voting_threshold_normal': 1, 'voting_threshold_warmup': 4,
-     'dbscan_min_samples': 4, 'dbscan_eps_multiplier': 1.1, 'warmup_rounds': 15},
-    
-    # Group 2: Based on Rank #1 pattern (mad=3.0, vote=1) but tweaked
-    {'pca_dims': 20, 'mad_k_normal': 3.0, 'mad_k_warmup': 4.5,
-     'voting_threshold_normal': 1, 'voting_threshold_warmup': 3,
-     'dbscan_min_samples': 4, 'dbscan_eps_multiplier': 1.2, 'warmup_rounds': 12},
-    
-    {'pca_dims': 20, 'mad_k_normal': 3.0, 'mad_k_warmup': 5.0,
-     'voting_threshold_normal': 1, 'voting_threshold_warmup': 4,
-     'dbscan_min_samples': 5, 'dbscan_eps_multiplier': 1.1, 'warmup_rounds': 15},
-    
-    {'pca_dims': 25, 'mad_k_normal': 3.0, 'mad_k_warmup': 4.5,
-     'voting_threshold_normal': 1, 'voting_threshold_warmup': 3,
-     'dbscan_min_samples': 3, 'dbscan_eps_multiplier': 1.0, 'warmup_rounds': 12},
-    
-    # Group 3: Based on Rank #3 pattern (mad=4.0, vote=3) but lower
-    {'pca_dims': 20, 'mad_k_normal': 3.5, 'mad_k_warmup': 5.0,
-     'voting_threshold_normal': 2, 'voting_threshold_warmup': 3,
-     'dbscan_min_samples': 3, 'dbscan_eps_multiplier': 1.0, 'warmup_rounds': 12},
-    
-    {'pca_dims': 20, 'mad_k_normal': 3.5, 'mad_k_warmup': 5.0,
-     'voting_threshold_normal': 2, 'voting_threshold_warmup': 4,
-     'dbscan_min_samples': 4, 'dbscan_eps_multiplier': 1.1, 'warmup_rounds': 15},
-    
-    {'pca_dims': 25, 'mad_k_normal': 3.5, 'mad_k_warmup': 4.5,
-     'voting_threshold_normal': 2, 'voting_threshold_warmup': 3,
-     'dbscan_min_samples': 5, 'dbscan_eps_multiplier': 1.2, 'warmup_rounds': 12},
-]
-
-
-def generate_full_grid():
-    """Generate all 864 combinations."""
-    keys = list(LAYER1_CONFIGS.keys())
-    values = [LAYER1_CONFIGS[k] for k in keys]
-    
-    configs = []
-    for combination in itertools.product(*values):
-        config = dict(zip(keys, combination))
-        configs.append(config)
-    
-    return configs
-
-
-def generate_strategic_sample(n=216):
-    """Generate full systematic grid of ~216 configs."""
-    
-    configs = []
-    
-    # Full grid on key params
-    for pca in [20, 25]:
-        for mad_k in [2.5, 3.0, 3.5]:
-            for mad_warmup in [4.5, 5.0, 5.5]:
-                for vote in [1, 2]:
-                    for vote_warmup in [3, 4]:
-                        for dbscan_min in [3, 4, 5]:
-                            for eps in [1.0, 1.2]:
-                                for warmup in [12, 15]:
-                                    config = {
-                                        'pca_dims': pca,
-                                        'mad_k_normal': mad_k,
-                                        'mad_k_warmup': mad_warmup,
-                                        'voting_threshold_normal': vote,
-                                        'voting_threshold_warmup': vote_warmup,
-                                        'dbscan_min_samples': dbscan_min,
-                                        'dbscan_eps_multiplier': eps,
-                                        'warmup_rounds': warmup,
-                                    }
-                                    configs.append(config)
-    
-    return configs
+    def save_suite(self, suite: Dict, filename: str = None) -> str:
+        """Save suite to JSON file."""
+        
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            step_str = str(self.grid_step).replace('.', '')
+            filename = f"h_weights_dense_{step_str}_{timestamp}.json"
+        
+        with open(filename, 'w') as f:
+            json.dump(suite, f, indent=2)
+        
+        return filename
 
 
 def main():
-    print(f"\n{'='*80}")
-    print(f"FOCUSED AGGRESSIVE SUITE - TARGET GRADE A")
-    print(f"{'='*80}\n")
+    parser = argparse.ArgumentParser(description='Generate dense H weights grid')
+    parser.add_argument('--grid-step', type=float, default=0.05,
+                       help='Grid step size (default: 0.05)')
+    parser.add_argument('--min-value', type=float, default=0.1,
+                       help='Minimum value for any weight (default: 0.1)')
     
-    print(f"🎯 TARGETS:")
-    print(f"   Detection Rate: 75-82%")
-    print(f"   FPR: 5-8%")
-    print(f"   F1 Score: 75-80%\n")
+    args = parser.parse_args()
     
-    print(f"📊 STRATEGY:")
-    print(f"   - Based on Grade B winners (Rank #1, #3)")
-    print(f"   - Make even more aggressive")
-    print(f"   - Focus on proven parameter ranges")
-    print(f"   - Strategic sampling (~200 configs)\n")
+    # Validate arguments
+    if args.grid_step <= 0 or args.grid_step >= 1.0:
+        print(f"❌ Invalid grid-step: {args.grid_step} (must be 0 < step < 1.0)")
+        return
     
-    # Generate
-    print(f"Generating full parameter grid...")
-    layer1_configs = generate_strategic_sample()  # Will generate 2*3*3*2*2*3*2*2 = 864
+    if args.min_value < 0 or args.min_value >= 0.5:
+        print(f"❌ Invalid min-value: {args.min_value} (must be 0 <= min < 0.5)")
+        return
     
-    # Standard configs for other layers
-    suite = {
-        'layer1': layer1_configs,
-        'layer2': [{
-            'distance_multiplier': 1.5,
-            'cosine_threshold': 0.3,
-            'warmup_rounds': 15,
-        }],
-        'noniid': [{
-            'h_threshold_normal': 0.6,
-            'h_threshold_alert': 0.5,
-            'adaptive_multiplier': 1.5,
-            'baseline_percentile': 60,
-        }],
-        'filtering': [{
-            'hard_k_threshold': 3,
-            'soft_reputation_threshold': 0.4,
-            'soft_distance_multiplier': 2.0,
-        }],
-        'reputation': [{
-            'ema_alpha_increase': 0.4,
-            'ema_alpha_decrease': 0.2,
-            'penalty_flagged': 0.2,
-            'penalty_variance': 0.1,
-            'reward_clean': 0.1,
-            'floor_lift_threshold': 0.4,
-        }],
-        'mode': [{
-            'threshold_normal_to_alert': 0.2,
-            'threshold_alert_to_defense': 0.3,
-            'hysteresis_normal': 0.1,
-            'hysteresis_defense': 0.15,
-            'rep_gate_defense': 0.5,
-        }],
-    }
+    print("=" * 80)
+    print("H WEIGHTS DENSE GRID GENERATOR")
+    print("=" * 80)
+    print()
     
-    # Create output
-    output = {
-        'generated_at': datetime.now().isoformat(),
-        'mode': 'focused_aggressive',
-        'total_configs': len(layer1_configs),
-        'default_config': {
-            # Layer 1 - Default aggressive
-            'pca_dims': 20,
-            'dbscan_min_samples': 3,
-            'dbscan_eps_multiplier': 1.0,
-            'mad_k_normal': 3.0,
-            'mad_k_warmup': 5.0,
-            'voting_threshold_normal': 1,
-            'voting_threshold_warmup': 3,
-            'warmup_rounds': 12,
-            
-            # Layer 2 - Fixed
-            'distance_multiplier': 1.5,
-            'cosine_threshold': 0.3,
-            'layer2_warmup_rounds': 15,
-            
-            # Non-IID - Fixed
-            'h_threshold_normal': 0.6,
-            'h_threshold_alert': 0.5,
-            'adaptive_multiplier': 1.5,
-            'baseline_percentile': 60,
-            
-            # Filtering - Fixed
-            'hard_k_threshold': 3,
-            'soft_reputation_threshold': 0.4,
-            'soft_distance_multiplier': 2.0,
-            
-            # Reputation - Fixed
-            'ema_alpha_increase': 0.4,
-            'ema_alpha_decrease': 0.2,
-            'penalty_flagged': 0.2,
-            'penalty_variance': 0.1,
-            'reward_clean': 0.1,
-            'floor_lift_threshold': 0.4,
-            
-            # Mode - Fixed
-            'threshold_normal_to_alert': 0.2,
-            'threshold_alert_to_defense': 0.3,
-            'hysteresis_normal': 0.1,
-            'hysteresis_defense': 0.15,
-            'rep_gate_defense': 0.5
-        },
-        'suite': suite,
-        'targets': {
-            'detection_rate': '75-82%',
-            'fpr': '5-8%',
-            'f1_score': '75-80%',
-            'grade': 'A'
-        },
-        'strategy': {
-            'basis': 'Current Grade B configs (Rank #1, #3)',
-            'approach': 'More aggressive thresholds',
-            'key_changes': [
-                'mad_k_normal: 2.5-3.5 (vs Grade B: 3.0-4.0)',
-                'voting: 1-2 (vs Grade B: 1-3)',
-                'Strategic sampling covering parameter space'
-            ]
-        }
-    }
+    # Generate suite
+    generator = DenseHWeightGenerator(
+        grid_step=args.grid_step,
+        min_value=args.min_value
+    )
+    suite = generator.generate_suite()
+    
+    # Statistics
+    print(f"📊 Suite Statistics:")
+    print(f"   Total configurations: {suite['metadata']['total_configs']}")
+    print(f"   Grid step: {args.grid_step}")
+    print(f"   Min value: {args.min_value}")
+    print()
+    
+    # Estimate time
+    configs = len(suite['suite']['h_weights'])
+    time_per_config = 40  # minutes (conservative)
+    total_hours = (configs * time_per_config) / 60
+    
+    print(f"⏱️  Estimated Time:")
+    print(f"   Per config: ~{time_per_config} minutes")
+    print(f"   Total: ~{total_hours:.1f} hours ({total_hours/24:.1f} days)")
+    print()
+    
+    # Profile breakdown
+    profiles = {}
+    for config in suite['suite']['h_weights']:
+        profile = config['profile']
+        profiles[profile] = profiles.get(profile, 0) + 1
+    
+    print(f"📈 Profile Breakdown:")
+    for profile, count in sorted(profiles.items(), key=lambda x: -x[1]):
+        print(f"   {profile:20s}: {count:3d} configs ({count/configs*100:.1f}%)")
+    print()
+    
+    # Sample configs
+    print(f"📋 Sample Configurations:")
+    samples = [0, configs//4, configs//2, 3*configs//4, configs-1]
+    for i in samples:
+        if i < len(suite['suite']['h_weights']):
+            config = suite['suite']['h_weights'][i]
+            print(f"   Config #{config['config_id']:3d} ({config['profile']:15s}): "
+                  f"CV={config['weight_cv']:.2f}, "
+                  f"sim={config['weight_sim']:.2f}, "
+                  f"cluster={config['weight_cluster']:.2f}")
+    print()
     
     # Save
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"param_suite_focused_aggressive_{timestamp}.json"
+    filename = generator.save_suite(suite)
+    print(f"💾 Suite saved to: {filename}")
+    print()
     
-    with open(filename, 'w') as f:
-        json.dump(output, f, indent=2)
-    
-    print(f"✅ Generated: {filename}\n")
-    print(f"📦 SUMMARY:")
-    print(f"   Total configs: {len(layer1_configs)}")
-    print(f"   Focus: Layer 1 optimization only")
-    print(f"   Other layers: Fixed defaults\n")
-    
-    est_hours = len(layer1_configs) * 6 / 60
-    print(f"⏱️  ESTIMATED TIME:")
-    print(f"   Per config: ~6 minutes")
-    print(f"   Total: {est_hours:.1f} hours ({est_hours/24:.1f} days)\n")
-    
-    print(f"🎯 EXPECTED:")
-    print(f"   Grade A: 5-10 configs")
-    print(f"   Grade B: 30-50 configs")
-    print(f"   Detection: 70-85%")
-    print(f"   FPR: 5-10%\n")
-    
-    print(f"{'='*80}")
-    print(f"✅ READY TO TEST")
-    print(f"{'='*80}\n")
-    
-    print(f"Next steps:")
-    print(f"  python create_param_configs.py {filename}")
-    print(f"  python -u run_param_tests.py param_suite_focused_aggressive_*.json")
-    print(f"  python analyze_layer1_results_v2.py param_test_results_intermediate.json\n")
+    # Usage instructions
+    print("=" * 80)
+    print("NEXT STEPS")
+    print("=" * 80)
+    print()
+    print("Run tests:")
+    print(f"  python3 run_h_weight_tests_chdir.py {filename}")
+    print()
+    print(f"⚠️  This will take ~{total_hours:.0f} hours!")
+    print()
+    print("Consider:")
+    print("  - Run overnight/weekend")
+    print("  - Use --grid-step 0.1 for faster testing (~30 configs, ~20 hours)")
+    print("  - Resume if interrupted with --resume flag")
+    print()
 
 
 if __name__ == "__main__":

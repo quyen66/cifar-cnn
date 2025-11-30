@@ -144,6 +144,9 @@ class FullPipelineStrategy(FedProx):
         # Non-IID Handler
         noniid_params = self.defense_params.get('noniid', {})
         self.noniid_handler = NonIIDHandler(
+            weight_cv=noniid_params.get('weight_cv', 0.4),
+            weight_sim=noniid_params.get('weight_sim', 0.4),
+            weight_cluster=noniid_params.get('weight_cluster', 0.2),
             h_threshold_normal=noniid_params.get('h_threshold_normal', 0.6),
             h_threshold_alert=noniid_params.get('h_threshold_alert', 0.5),
             adaptive_multiplier=noniid_params.get('adaptive_multiplier', 1.5),
@@ -584,6 +587,7 @@ def server_fn(context: Context) -> ServerAppComponents:
     attack_type = context.run_config.get("attack-type", "none")
     attack_ratio = context.run_config.get("attack-ratio", 0.0)
     partition_type = context.run_config.get("partition-type", "iid")
+    alpha = context.run_config.get("alpha", 0.5)
     
     # Load ALL defense params
     defense_params = {}
@@ -659,6 +663,7 @@ def server_fn(context: Context) -> ServerAppComponents:
     config_metadata = {
         'num_clients': num_clients,
         'partition_type': partition_type,
+        'alpha': alpha,
         'attack_type': attack_type,
         'attack_ratio': attack_ratio,
         'enable_defense': enable_defense,

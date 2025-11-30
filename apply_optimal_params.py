@@ -2,8 +2,8 @@
 Auto-generated script to apply optimal parameters
 ==================================================
 
-Generated from: param_test_results_20251115_010944_layer1_gradeB.json
-Generated at: 2025-11-15T01:09:44.172767
+Generated from: param_test_results_20251127_225908.json
+Generated at: 2025-11-27T22:59:08.318388
 
 This script updates all defense layer files with optimal parameters.
 
@@ -18,7 +18,7 @@ from pathlib import Path
 # OPTIMAL PARAMETERS
 # ============================================================================
 
-OPTIMAL_PARAMS = {'layer1': {'pca_dims': 20, 'mad_k_normal': 5.0, 'mad_k_warmup': 6.0, 'dbscan_min_samples': 4, 'dbscan_eps_multiplier': 1.2, 'voting_threshold_normal': 4, 'voting_threshold_warmup': 3, 'warmup_rounds': 20}}
+OPTIMAL_PARAMS = {'layer1': {'pca_dims': 25, 'mad_k_normal': 3.5, 'mad_k_warmup': 5.5, 'voting_threshold_normal': 2, 'voting_threshold_warmup': 3, 'dbscan_min_samples': 4, 'dbscan_eps_multiplier': 1.0, 'warmup_rounds': 15}}
 
 # ============================================================================
 # FILE UPDATERS
