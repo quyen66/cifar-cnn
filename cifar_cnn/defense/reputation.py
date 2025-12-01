@@ -20,7 +20,7 @@ class ReputationSystem:
                  penalty_variance: float = 0.1,
                  reward_clean: float = 0.1,
                  floor_lift_threshold: float = 0.4,
-                 floor_lift_amount: float = 0.2,
+                 floor_target_value: float = 0.2,
                  initial_reputation: float = 0.8):
         """
         Initialize Reputation System with configurable parameters.
@@ -32,7 +32,7 @@ class ReputationSystem:
             penalty_variance: Penalty for high gradient variance
             reward_clean: Reward for clean behavior
             floor_lift_threshold: Threshold to trigger floor lifting
-            floor_lift_amount: Amount to lift floor
+            floor_target_value: Amount to lift floor
             initial_reputation: Initial reputation for new clients
         """
         self.ema_alpha_increase = ema_alpha_increase
@@ -41,7 +41,7 @@ class ReputationSystem:
         self.penalty_variance = penalty_variance
         self.reward_clean = reward_clean
         self.floor_lift_threshold = floor_lift_threshold
-        self.floor_lift_amount = floor_lift_amount
+        self.floor_target_value = floor_target_value
         self.initial_reputation = initial_reputation
         
         # Client reputations
@@ -51,7 +51,7 @@ class ReputationSystem:
         print(f"   EMA alphas: increase={ema_alpha_increase}, decrease={ema_alpha_decrease}")
         print(f"   Penalties: flagged={penalty_flagged}, variance={penalty_variance}")
         print(f"   Reward: {reward_clean}")
-        print(f"   Floor lift: threshold={floor_lift_threshold}, amount={floor_lift_amount}")
+        print(f"   Floor lift: threshold={floor_lift_threshold}, amount={floor_target_value}")
     
     def initialize_client(self, client_id: int):
         """Initialize reputation for a new client."""
@@ -97,7 +97,7 @@ class ReputationSystem:
         
         # Floor lifting
         if new_rep < self.floor_lift_threshold:
-            new_rep += self.floor_lift_amount
+            new_rep += self.floor_target_value
             new_rep = min(1.0, new_rep)
         
         self.reputations[client_id] = new_rep

@@ -214,130 +214,106 @@ class NonIIDHandler:
     def update_client_gradient(self, client_id: int, gradient: np.ndarray):
         """
         Update gradient history for a client.
-        
-        This is called EVERY round to maintain history for baseline tracking.
+        OPTIMIZED: Only store gradient norm to save RAM (Solution 3).
         """
+        # Tính Norm (độ lớn) của gradient hiện tại
+        norm_val = float(np.linalg.norm(gradient))
+        
+        # Khởi tạo deque nếu chưa có
         if client_id not in self.client_gradients:
             self.client_gradients[client_id] = deque(maxlen=self.baseline_window_size)
         
-        self.client_gradients[client_id].append(gradient.flatten())
-    
-    def compute_baseline_deviation(self, 
-                                   client_id: int,
-                                   current_gradient: np.ndarray) -> float:
+        # CHỈ LƯU NORM (số thực nhẹ), KHÔNG lưu cả vector gradient (nặng)
+        self.client_gradients[client_id].append(norm_val)
+
+    def compute_baseline_deviation(self, client_id: int, current_gradient: np.ndarray) -> float:
         """
         Compute deviation from client's baseline.
-        
-        LOGIC: Compare current gradient norm with historical baseline.
-        Higher deviation = More anomalous = Potential attack or drift.
-        
-        Args:
-            client_id: Client ID
-            current_gradient: Current gradient from this client
-        
-        Returns:
-            Deviation score (0-∞, higher = more anomalous)
-            - 0.0: No deviation (perfectly aligned with history)
-            - > 0.3: Significant deviation (trigger penalty in confidence scoring)
-        
-        Formula:
-            deviation = |current_norm - baseline| / baseline
-            where baseline = percentile(historical_norms)
-        
-        Example:
-            - Historical norms: [0.5, 0.6, 0.55, 0.52, 0.58]
-            - Baseline (60th percentile): 0.57
-            - Current norm: 0.85
-            - Deviation = |0.85 - 0.57| / 0.57 = 0.49 (HIGH)
+        OPTIMIZED: Works with stored Norms instead of full vectors.
         """
         if client_id not in self.client_gradients:
             return 0.0
         
-        history = list(self.client_gradients[client_id])
+        # Lấy lịch sử (bây giờ là list các số thực Norm, không phải vector)
+        historical_norms = list(self.client_gradients[client_id])
         
-        if len(history) < 2:
+        if len(historical_norms) < 2:
             return 0.0
         
-        # Compute baseline from historical norms
-        historical_norms = [np.linalg.norm(g) for g in history]
+        # Tính baseline từ lịch sử Norm có sẵn (không cần tính toán lại)
         baseline = np.percentile(historical_norms, self.baseline_percentile)
         
-        # Current norm
-        current_norm = np.linalg.norm(current_gradient.flatten())
+        # Tính norm của gradient hiện tại để so sánh
+        current_norm = float(np.linalg.norm(current_gradient.flatten()))
         
-        # Deviation (normalized)
+        # Tránh lỗi chia cho 0
+        if baseline < 1e-9:
+            return 0.0
+            
+        # Tính độ lệch: |current - baseline| / baseline
         deviation = abs(current_norm - baseline) / (baseline + 1e-10)
         
         return deviation
     
-    def compute_baseline_deviation_detailed(self,
-                                           client_id: int,
-                                           current_gradient: np.ndarray,
-                                           median_gradient: np.ndarray) -> Dict[str, float]:
+    def compute_baseline_deviation_detailed(self, 
+                                          client_id: int, 
+                                          current_gradient: np.ndarray,
+                                          grad_median: np.ndarray) -> Dict[str, float]:
         """
-        Compute detailed baseline deviation with norm + direction components.
-        
-        Formula from PDF trang 10:
-        δi = delta_norm_weight × δ_norm(i) + delta_direction_weight × δ_dir(i)
-        
-        Args:
-            client_id: Client ID
-            current_gradient: Current gradient
-            median_gradient: Median gradient from all clients
-        
-        Returns:
-            Dict with 'delta_norm', 'delta_direction', 'delta_combined'
+        Compute detailed baseline deviation (Norm + Direction).
+        OPTIMIZED: Works with stored Norms instead of full vectors.
         """
+        # 1. Delta Norm (Dựa trên lịch sử Norm đã lưu)
         if client_id not in self.client_gradients:
-            return {
-                'delta_norm': 0.0,
-                'delta_direction': 0.0,
-                'delta_combined': 0.0
-            }
+            # Chưa có lịch sử thì deviation = 0
+            return {'delta_norm': 0.0, 'delta_direction': 0.0, 'delta_combined': 0.0}
         
-        history = list(self.client_gradients[client_id])
-        if len(history) < 2:
-            return {
-                'delta_norm': 0.0,
-                'delta_direction': 0.0,
-                'delta_combined': 0.0
-            }
+        # Lấy lịch sử (bây giờ là list các số thực Norm, không phải vector)
+        historical_norms = list(self.client_gradients[client_id])
         
-        # ===== Component 1: Norm Deviation =====
-        # Historical baseline
-        historical_norms = [np.linalg.norm(g) for g in history]
-        baseline_norm = np.percentile(historical_norms, self.baseline_percentile)
+        if len(historical_norms) < 2:
+            return {'delta_norm': 0.0, 'delta_direction': 0.0, 'delta_combined': 0.0}
+            
+        # Tính baseline từ lịch sử Norm có sẵn (không cần tính toán lại)
+        baseline = np.percentile(historical_norms, self.baseline_percentile)
         
-        # Current norm
-        current_norm = np.linalg.norm(current_gradient.flatten())
+        # Tính norm của gradient hiện tại
+        current_norm = float(np.linalg.norm(current_gradient.flatten()))
         
-        # Normalized deviation
-        delta_norm = abs(current_norm - baseline_norm) / (baseline_norm + 1e-10)
+        # Tránh lỗi chia cho 0
+        if baseline < 1e-9:
+            delta_norm = 0.0
+        else:
+            delta_norm = abs(current_norm - baseline) / (baseline + 1e-10)
+            
+        # 2. Delta Direction (Dựa trên Median hiện tại, KHÔNG cần lịch sử)
+        # Cosine Distance = 1 - Cosine Similarity
         
-        # ===== Component 2: Direction Deviation =====
-        # Compute cosine similarity với median gradient
-        current_flat = current_gradient.flatten()
-        median_flat = median_gradient.flatten()
+        g_flat = current_gradient.flatten()
+        m_flat = grad_median.flatten()
         
-        cosine_sim = np.dot(current_flat, median_flat) / (
-            np.linalg.norm(current_flat) * np.linalg.norm(median_flat) + 1e-10
-        )
+        dot = np.dot(g_flat, m_flat)
+        norm_g = np.linalg.norm(g_flat)
+        norm_m = np.linalg.norm(m_flat)
         
-        # Direction deviation: 1 - cosine_sim
-        # High cosine_sim (close to 1) → Low delta_direction (good)
-        # Low cosine_sim (close to -1) → High delta_direction (bad)
-        delta_direction = max(0.0, 1.0 - cosine_sim)
+        if norm_g < 1e-9 or norm_m < 1e-9:
+            delta_dir = 0.0
+        else:
+            # Similarity [-1, 1]
+            cosine_sim = dot / (norm_g * norm_m)
+            # Distance [0, 2] (0 là trùng hướng, 2 là ngược hướng)
+            delta_dir = 1.0 - cosine_sim 
+            
+        # 3. Kết hợp (Dùng trọng số cấu hình)
+        # Lấy weight từ self (đã init từ config), mặc định 0.5
+        w_norm = getattr(self, 'delta_norm_weight', 0.5)
+        w_dir = getattr(self, 'delta_direction_weight', 0.5)
         
-        # ===== Combine với weights từ config =====
-        # Formula: δi = delta_norm_weight × δ_norm + delta_direction_weight × δ_dir
-        delta_combined = (
-            self.delta_norm_weight * delta_norm +
-            self.delta_direction_weight * delta_direction
-        )
+        delta_combined = w_norm * delta_norm + w_dir * delta_dir
         
         return {
             'delta_norm': delta_norm,
-            'delta_direction': delta_direction,
+            'delta_direction': delta_dir,
             'delta_combined': delta_combined
         }
 
