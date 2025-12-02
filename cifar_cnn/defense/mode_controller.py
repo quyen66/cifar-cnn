@@ -3,6 +3,7 @@
 from typing import List, Dict
 from logging import INFO
 from flwr.common.logger import log
+import numpy as np
 
 class ModeController:
     """

@@ -435,7 +435,7 @@ def server_fn(context: Context) -> ServerAppComponents:
             # Correct mapping for updated Probation logic
             'floor_warning_threshold': context.run_config.get("defense.reputation.floor-warning-threshold", 0.2),
             'probation_rounds': context.run_config.get("defense.reputation.floor-probation-rounds", 5),
-            'initial_reputation': context.run_config.get("defense.reputation.initial-reputation", 0.8)
+            'initial_reputation': context.run_config.get("defense.reputation.initial-reputation", 0.1)
         }
         
         defense_params['mode'] = {

@@ -1,10 +1,10 @@
 """
-Reputation System (LOGIC FIXED - NO INFINITE LOOP)
-===================================================
+Reputation System (LOGIC FIXED - DYNAMIC INITIALIZATION)
+=========================================================
 UPDATES:
-1. ✅ Fix Infinite Probation Loop: Chỉ bắt vào Probation nếu R < 0.2 VÀ đang giảm.
-2. ✅ Probation Logic: Đóng băng EMA, đếm 5 vòng tốt liên tiếp.
-3. ✅ Config: Sử dụng đúng tham số từ PDF (ngưỡng 0.2, 5 vòng).
+1. ✅ Dynamic Init: Sử dụng self.initial_reputation cho client mới (không fix cứng).
+2. ✅ Fix Infinite Probation Loop: Chỉ bắt vào Probation nếu R < 0.2 VÀ đang giảm.
+3. ✅ Probation Logic: Đóng băng EMA, đếm 5 vòng tốt liên tiếp.
 """
 import numpy as np
 from typing import Dict
@@ -18,7 +18,7 @@ class ReputationSystem:
                  reward_clean: float = 0.1,
                  floor_warning_threshold: float = 0.2, # Ngưỡng vào Probation (PDF: 0.2)
                  probation_rounds: int = 5,            # Số vòng thử thách (PDF: 5)
-                 initial_reputation: float = 0.8):
+                 initial_reputation: float = 0.1):     # Mặc định an toàn là 0.1 (Risk Dilution Fix)
         
         self.ema_alpha_increase = ema_alpha_increase
         self.ema_alpha_decrease = ema_alpha_decrease
@@ -34,18 +34,23 @@ class ReputationSystem:
         # Map: {client_id: consecutive_good_rounds}
         self.probation_list = {} 
         
-        print(f"✅ ReputationSystem Initialized (Smart Probation Logic)")
-        print(f"   Rule: If R < {floor_warning_threshold} AND dropping -> Freeze for {probation_rounds} rounds.")
+        print(f"✅ ReputationSystem Initialized")
+        print(f"   ► Initial Reputation: {self.initial_reputation}")
+        print(f"   ► Probation Rule: If R < {floor_warning_threshold} AND dropping -> Freeze for {probation_rounds} rounds.")
 
     def initialize_client(self, client_id: int, is_trusted: bool = False):
+        """Khởi tạo danh tiếng cho client mới."""
         if client_id not in self.reputations:
             if is_trusted:
+                # Trusted nodes (Vòng 1-10) luôn bắt đầu max
                 self.reputations[client_id] = 1.0
             else:
-                self.reputations[client_id] = 0.5 
+                # Client mới (Vòng 11+) dùng giá trị cấu hình (nên để thấp ~0.1)
+                self.reputations[client_id] = self.initial_reputation
 
     def get_reputation(self, client_id: int) -> float:
-        return self.reputations.get(client_id, 0.5)
+        # Trả về giá trị khởi tạo nếu chưa có
+        return self.reputations.get(client_id, self.initial_reputation)
 
     def update(self,
                client_id: int,
@@ -65,7 +70,7 @@ class ReputationSystem:
             if was_flagged:
                 # Nếu hư trong lúc thử thách: Reset bộ đếm về 0
                 self.probation_list[client_id] = 0
-                print(f"   Client {client_id} (Probation): Bad behavior! Counter reset to 0.")
+                # print(f"   Client {client_id} (Probation): Bad behavior! Counter reset to 0.")
                 
                 # Vẫn tính phạt để giảm điểm tiếp (răn đe)
                 delta = -self.penalty_flagged
@@ -115,7 +120,7 @@ class ReputationSystem:
         
         # 5. Check Entry to Probation (CRITICAL FIX)
         # Chỉ vào tù nếu điểm thấp dưới ngưỡng VÀ điểm đang giảm (bị phạt).
-        # Nếu điểm thấp (<0.2) nhưng đang tăng (do vừa thoát tù), thì KHÔNG bắt lại.
+        # Nếu điểm thấp (<0.2) nhưng đang tăng (do vừa thoát tù/mới vào round 11), thì KHÔNG bắt lại.
         is_dropping = (new_rep < current_rep)
         
         if new_rep < self.floor_warning_threshold and is_dropping and client_id not in self.probation_list:
