@@ -1,234 +1,132 @@
-"""
-Layer 1: Enhanced DBSCAN Detection
-===================================
-Detects obvious Byzantine and Gaussian noise attacks using:
-1. Magnitude filter with MAD (Median Absolute Deviation)
-2. DBSCAN clustering in reduced PCA space
-3. Voting mechanism to combine both detectors
-
-ALL PARAMETERS ARE CONFIGURABLE VIA CONSTRUCTOR (loaded from pyproject.toml)
-"""
+# cifar_cnn/defense/layer1_dbscan.py
 
 import numpy as np
-from sklearn.decomposition import PCA
 from sklearn.cluster import DBSCAN
-from scipy.spatial.distance import pdist, squareform
-from typing import Dict, List, Tuple
-
+from sklearn.decomposition import PCA
+from typing import List, Dict, Optional
+from logging import INFO, DEBUG
+from flwr.common.logger import log
 
 class Layer1Detector:
-    """
-    Enhanced DBSCAN detector với magnitude filter và voting.
-    
-    ALL parameters can be configured externally.
-    """
-    
-    def __init__(self, 
-                 pca_dims: int = 20,
-                 dbscan_min_samples: int = 3,
-                 dbscan_eps_multiplier: float = 0.5,
-                 mad_k_normal: float = 4.0,
-                 mad_k_warmup: float = 6.0,
-                 voting_threshold_normal: int = 2,
-                 voting_threshold_warmup: int = 3,
-                 warmup_rounds: int = 10):
-        """
-        Initialize Layer 1 Detector with configurable parameters.
-        
-        Args:
-            pca_dims: Number of PCA dimensions for dimensionality reduction
-            dbscan_min_samples: Min samples for DBSCAN core point
-            dbscan_eps_multiplier: Multiplier for auto-computed DBSCAN epsilon
-            mad_k_normal: MAD multiplier for magnitude threshold (normal mode)
-            mad_k_warmup: MAD multiplier for magnitude threshold (warmup mode)
-            voting_threshold_normal: Total votes needed to flag (normal mode)
-            voting_threshold_warmup: Total votes needed to flag (warmup mode)
-            warmup_rounds: Number of warmup rounds with looser thresholds
-        """
-        # Store all parameters
-        self.pca_dims = pca_dims
-        self.dbscan_min_samples = dbscan_min_samples
-        self.dbscan_eps_multiplier = dbscan_eps_multiplier
+    def __init__(
+        self,
+        pca_dims: int = 20, # Đây sẽ đóng vai trò là "Ngưỡng trần" (Target Max)
+        dbscan_min_samples: int = 3,
+        dbscan_eps_multiplier: float = 0.5,
+        mad_k_normal: float = 4.0,
+        mad_k_warmup: float = 6.0,
+        voting_threshold_normal: int = 2,
+        voting_threshold_warmup: int = 3,
+        warmup_rounds: int = 10
+    ):
+        self.target_pca_dims = pca_dims
+        self.min_samples = dbscan_min_samples
+        self.eps_multiplier = dbscan_eps_multiplier
         self.mad_k_normal = mad_k_normal
         self.mad_k_warmup = mad_k_warmup
         self.voting_threshold_normal = voting_threshold_normal
         self.voting_threshold_warmup = voting_threshold_warmup
         self.warmup_rounds = warmup_rounds
         
-        # PCA projector (fitted on first call)
-        self.pca = None
-        
-        print(f"✅ Layer1Detector initialized with params:")
-        print(f"   PCA: dims={pca_dims}")
-        print(f"   DBSCAN: min_samples={dbscan_min_samples}, eps_mult={dbscan_eps_multiplier}")
-        print(f"   MAD-k: normal={mad_k_normal}, warmup={mad_k_warmup}")
-        print(f"   Voting: normal={voting_threshold_normal}, warmup={voting_threshold_warmup}")
-        print(f"   Warmup: {warmup_rounds} rounds")
-    
-    def detect(self, 
-               gradients: List[np.ndarray],
-               client_ids: List[int],
-               is_malicious_ground_truth: List[bool],
-               current_round: int) -> Dict[int, bool]:
+        # Stats
+        self.pca_fitted = False
+        self.last_noise_count = 0
+
+    def detect(
+        self,
+        gradients: List[np.ndarray],
+        client_ids: List[int],
+        is_malicious_ground_truth: Optional[List[bool]] = None,
+        current_round: int = 0
+    ) -> Dict[int, bool]:
         """
-        Detect malicious clients using Layer 1.
-        
-        Args:
-            gradients: List of gradient arrays from clients
-            client_ids: List of client IDs
-            is_malicious_ground_truth: Ground truth for debugging
-            current_round: Current training round
-            
-        Returns:
-            Dictionary mapping client_id -> is_malicious (True/False)
+        Phát hiện tấn công bằng kết hợp Magnitude Filter và DBSCAN trên PCA.
         """
-        n = len(gradients)
-        
-        # Determine if in warmup phase
-        is_warmup = current_round <= self.warmup_rounds
-        
-        # Step 1: Magnitude Filter
-        magnitude_flags, magnitude_votes = self._magnitude_filter(
-            gradients, is_warmup=is_warmup
-        )
-        
-        # Step 2: DBSCAN Clustering
-        dbscan_flags, dbscan_votes = self._dbscan_filter(
-            gradients, is_warmup=is_warmup
-        )
-        
-        # Step 3: Voting Mechanism
-        layer1_flags = self._voting_mechanism(
-            magnitude_votes, dbscan_votes, is_warmup=is_warmup
-        )
-        
-        # Map to client IDs
-        detection_results = {
-            client_ids[i]: layer1_flags[i] 
-            for i in range(n)
-        }
-        
-        # Log detection results
-        num_detected = sum(layer1_flags)
-        if num_detected > 0:
-            detected_ids = [client_ids[i] for i in range(n) if layer1_flags[i]]
-            print(f"🚨 Layer 1 detected {num_detected}/{n} malicious clients: {detected_ids}")
-        
-        return detection_results
-    
-    def _magnitude_filter(self, 
-                         gradients: List[np.ndarray],
-                         is_warmup: bool) -> Tuple[List[bool], List[int]]:
-        """
-        Magnitude filter using MAD (Median Absolute Deviation).
-        
-        Uses configurable k values from constructor.
-        """
-        n = len(gradients)
-        
-        # Compute gradient norms
-        norms = np.array([np.linalg.norm(g.flatten()) for g in gradients])
-        
-        # MAD-based threshold
+        num_clients = len(gradients)
+        if num_clients < 2:
+            return {cid: False for cid in client_ids}
+
+        # 1. Magnitude Check (Bộ lọc độ lớn)
+        # ---------------------------------------------------------
+        norms = np.linalg.norm(gradients, axis=1)
         median_norm = np.median(norms)
-        mad = np.median(np.abs(norms - median_norm))
+        mad_norm = np.median(np.abs(norms - median_norm))
         
-        # Use configured k values
-        k = self.mad_k_warmup if is_warmup else self.mad_k_normal
-        threshold = median_norm + k * mad
+        # Chọn ngưỡng K tùy theo giai đoạn (Warmup nới lỏng hơn)
+        k_mad = self.mad_k_warmup if current_round < self.warmup_rounds else self.mad_k_normal
         
-        # Flag outliers
-        flags = [norm > threshold for norm in norms]
+        # Tránh chia cho 0 nếu tất cả gradient giống hệt nhau
+        effective_mad = mad_norm if mad_norm > 1e-9 else 1.0
+        threshold_mag = median_norm + k_mad * effective_mad
         
-        # Votes: magnitude filter gives weight 2
-        votes = [2 if flag else 0 for flag in flags]
+        mag_flags = [norm > threshold_mag for norm in norms]
+
+        # 2. PCA + DBSCAN Clustering
+        # ---------------------------------------------------------
+        # FIX: Dynamic PCA Dims Calculation
+        # Logic: 
+        # - Target: self.target_pca_dims (20)
+        # - Density constraint: 50% số lượng client (để không gian đủ đặc)
+        # - Hard constraint: min(num_clients, n_features)
         
-        return flags, votes
-    
-    def _dbscan_filter(self, 
-                      gradients: List[np.ndarray],
-                      is_warmup: bool) -> Tuple[List[bool], List[int]]:
-        """
-        DBSCAN clustering in PCA-reduced space.
+        density_constrained_dims = max(2, int(num_clients * 0.5))
+        optimal_dims = min(self.target_pca_dims, density_constrained_dims)
         
-        Uses configurable DBSCAN parameters from constructor.
-        """
-        n = len(gradients)
+        # Đảm bảo không vượt quá số lượng mẫu thực tế (Sklearn requirement)
+        final_pca_dims = min(optimal_dims, num_clients)
         
-        # Stack gradients into matrix
-        grad_matrix = np.vstack([g.flatten() for g in gradients])
+        # Chỉ chạy PCA nếu có đủ ít nhất 2 client
+        dbscan_flags = [False] * num_clients
         
-        # PCA dimensionality reduction
-        if self.pca is None:
-            # Fit PCA on first call
-            actual_dims = min(self.pca_dims, n - 1, grad_matrix.shape[1])
-            self.pca = PCA(n_components=actual_dims)
-            grad_reduced = self.pca.fit_transform(grad_matrix)
-        else:
-            grad_reduced = self.pca.transform(grad_matrix)
+        if final_pca_dims >= 2:
+            try:
+                # Dùng RandomizedPCA cho nhanh nếu dữ liệu lớn, hoặc mặc định
+                pca = PCA(n_components=final_pca_dims, svd_solver='randomized', random_state=42)
+                reduced_grads = pca.fit_transform(gradients)
+                self.pca_fitted = True
+                
+                # Tính Epsilon động cho DBSCAN
+                # Dùng khoảng cách k-nearest neighbors trung bình để ước lượng epsilon
+                # Ở đây dùng heuristic đơn giản: 0.5 * median pairwise distance
+                from sklearn.metrics.pairwise import euclidean_distances
+                dists = euclidean_distances(reduced_grads)
+                median_dist = np.median(dists)
+                eps = median_dist * self.eps_multiplier
+                
+                # Nếu eps quá nhỏ (các điểm trùng nhau), set min threshold
+                if eps < 1e-6: eps = 0.5 
+
+                # Chạy DBSCAN
+                clustering = DBSCAN(eps=eps, min_samples=self.min_samples, metric='euclidean')
+                labels = clustering.fit_predict(reduced_grads)
+                
+                # Label -1 là nhiễu (outlier)
+                dbscan_flags = [label == -1 for label in labels]
+                self.last_noise_count = sum(dbscan_flags)
+                
+            except Exception as e:
+                log(INFO, f"⚠️ PCA/DBSCAN failed: {e}. Fallback to Magnitude only.")
+                dbscan_flags = [False] * num_clients
         
-        # Compute adaptive eps
-        pairwise_dists = squareform(pdist(grad_reduced, metric='euclidean'))
-        median_dist = np.median(pairwise_dists[np.triu_indices(n, k=1)])
+        # 3. Voting Mechanism (Kết hợp kết quả)
+        # ---------------------------------------------------------
+        # Normal mode: Cần cả 2 bộ lọc đồng ý (AND) hoặc 1 cái quá tệ?
+        # Đề xuất: Union (OR) để an toàn cao nhất, HOẶC Voting có trọng số.
+        # Ở đây dùng logic:
+        # - Nếu Magnitude quá lớn -> Flag ngay.
+        # - Nếu DBSCAN thấy tách biệt -> Flag.
+        # -> Dùng OR (Union) là an toàn nhất cho Defense.
         
-        # Use configured eps multiplier
-        eps = self.dbscan_eps_multiplier * median_dist
-        
-        # DBSCAN clustering with configured min_samples
-        dbscan = DBSCAN(eps=eps, min_samples=self.dbscan_min_samples)
-        labels = dbscan.fit_predict(grad_reduced)
-        
-        # Flag outliers and small clusters
-        flags = []
-        for i in range(n):
-            if labels[i] == -1:
-                # Noise point
-                flags.append(True)
-            else:
-                # Check cluster size
-                cluster_size = np.sum(labels == labels[i])
-                if cluster_size < 3:
-                    flags.append(True)
-                else:
-                    flags.append(False)
-        
-        # Votes: DBSCAN gives weight 1
-        votes = [1 if flag else 0 for flag in flags]
-        
-        return flags, votes
-    
-    def _voting_mechanism(self,
-                         magnitude_votes: List[int],
-                         dbscan_votes: List[int],
-                         is_warmup: bool) -> List[bool]:
-        """
-        Voting mechanism to combine magnitude and DBSCAN detections.
-        
-        Uses configurable voting thresholds from constructor.
-        """
-        n = len(magnitude_votes)
-        
-        # Compute total votes
-        total_votes = [magnitude_votes[i] + dbscan_votes[i] for i in range(n)]
-        
-        # Use configured voting thresholds
-        threshold = self.voting_threshold_warmup if is_warmup else self.voting_threshold_normal
-        
-        # Flag if votes >= threshold
-        flags = [votes >= threshold for votes in total_votes]
-        
-        return flags
-    
+        final_flags = {}
+        for i, cid in enumerate(client_ids):
+            # Kết hợp: Bị flag nếu vi phạm Magnitude HOẶC bị DBSCAN cô lập
+            is_attack = mag_flags[i] or dbscan_flags[i]
+            final_flags[cid] = is_attack
+            
+        return final_flags
+
     def get_stats(self) -> Dict:
-        """Get detector statistics."""
         return {
-            'pca_dims': self.pca_dims,
-            'dbscan_min_samples': self.dbscan_min_samples,
-            'dbscan_eps_multiplier': self.dbscan_eps_multiplier,
-            'mad_k_normal': self.mad_k_normal,
-            'mad_k_warmup': self.mad_k_warmup,
-            'voting_threshold_normal': self.voting_threshold_normal,
-            'voting_threshold_warmup': self.voting_threshold_warmup,
-            'warmup_rounds': self.warmup_rounds,
-            'pca_fitted': self.pca is not None
+            "pca_fitted": self.pca_fitted,
+            "last_noise_count": self.last_noise_count
         }

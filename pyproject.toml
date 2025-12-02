@@ -79,6 +79,9 @@ resume-from = ""
 # ----- Defense System -----
 enable-defense = true
 
+# Warmup Phase
+warmup-rounds = 10
+
 # =====================================================================
 # DEFENSE PARAMETERS - LAYER 1: DBSCAN DETECTION
 # =====================================================================
@@ -104,9 +107,6 @@ mad-k-warmup = 6.0
 voting-threshold-normal = 2
 voting-threshold-warmup = 3
 
-# Warmup Phase (implementation detail)
-warmup-rounds = 10
-
 # =====================================================================
 # DEFENSE PARAMETERS - LAYER 2: DISTANCE + DIRECTION DETECTION
 # =====================================================================
@@ -121,9 +121,6 @@ distance-multiplier = 1.5
 
 # Direction Check (từ PDF: "< 0.3")
 cosine-threshold = 0.3
-
-# Warmup Phase
-warmup-rounds = 15
 
 # =====================================================================
 # DEFENSE PARAMETERS - NON-IID HANDLER
@@ -211,7 +208,7 @@ soft-enabled = true
 
 # EMA (Exponential Moving Average)
 # PDF nói "α↓ < α↑" nhưng không cho giá trị cụ thể
-ema-alpha-increase = 0.1
+ema-alpha-increase = 0.15
 ema-alpha-decrease = 0.5
 
 # Penalties
