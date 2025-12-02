@@ -247,7 +247,7 @@ hysteresis-normal = 0.05
 hysteresis-defense = 0.15
 
 # Reputation Gates (điều kiện để chuyển vào DEFENSE)
-rep-gate-defense = 0.5
+rep-gate-defense = 0.1
 
 # Initial Mode
 initial-mode = "NORMAL"
