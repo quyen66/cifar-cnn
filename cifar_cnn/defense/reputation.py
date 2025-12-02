@@ -11,8 +11,8 @@ from typing import Dict
 
 class ReputationSystem:
     def __init__(self,
-                 ema_alpha_increase: float = 0.4,
-                 ema_alpha_decrease: float = 0.2,
+                 ema_alpha_increase: float = 0.15,
+                 ema_alpha_decrease: float = 0.5,
                  penalty_flagged: float = 0.2,
                  penalty_variance: float = 0.1,
                  reward_clean: float = 0.1,
