@@ -1,105 +1,136 @@
-# cifar_cnn/defense/reputation.py
-
-from typing import Dict, List, Optional
-from collections import defaultdict
-from logging import INFO
-from flwr.common.logger import log
+"""
+Reputation System (LOGIC FIXED - NO INFINITE LOOP)
+===================================================
+UPDATES:
+1. ✅ Fix Infinite Probation Loop: Chỉ bắt vào Probation nếu R < 0.2 VÀ đang giảm.
+2. ✅ Probation Logic: Đóng băng EMA, đếm 5 vòng tốt liên tiếp.
+3. ✅ Config: Sử dụng đúng tham số từ PDF (ngưỡng 0.2, 5 vòng).
+"""
+import numpy as np
+from typing import Dict
 
 class ReputationSystem:
-    def __init__(
-        self,
-        ema_alpha_increase: float = 0.1,
-        ema_alpha_decrease: float = 0.6,
-        penalty_flagged: float = 0.2,
-        penalty_variance: float = 0.1,
-        reward_clean: float = 0.1,
-        floor_warning_threshold: float = 0.2, # Key mới
-        floor_target_value: float = 0.3,      # Key mới
-        floor_probation_rounds: int = 5,      # Key mới
-        initial_reputation: float = 0.5,
-        # Giữ lại các tham số cũ (nhưng không dùng) để tránh lỗi nếu server truyền dư
-        floor_lift_threshold: Optional[float] = None,
-        floor_lift_amount: Optional[float] = None
-    ):
-        # Param Config
-        self.alpha_up = ema_alpha_increase
-        self.alpha_down = ema_alpha_decrease
+    def __init__(self,
+                 ema_alpha_increase: float = 0.4,
+                 ema_alpha_decrease: float = 0.2,
+                 penalty_flagged: float = 0.2,
+                 penalty_variance: float = 0.1,
+                 reward_clean: float = 0.1,
+                 floor_warning_threshold: float = 0.2, # Ngưỡng vào Probation (PDF: 0.2)
+                 probation_rounds: int = 5,            # Số vòng thử thách (PDF: 5)
+                 initial_reputation: float = 0.8):
+        
+        self.ema_alpha_increase = ema_alpha_increase
+        self.ema_alpha_decrease = ema_alpha_decrease
         self.penalty_flagged = penalty_flagged
+        self.penalty_variance = penalty_variance
         self.reward_clean = reward_clean
         
-        # Initial State
+        self.floor_warning_threshold = floor_warning_threshold
+        self.probation_rounds = probation_rounds
         self.initial_reputation = initial_reputation
-        self.reputations: Dict[str, float] = defaultdict(lambda: self.initial_reputation)
         
-        # Probation Logic Config
-        # Ưu tiên dùng key mới, nếu không có thì fallback sang key cũ (để tương thích ngược)
-        self.floor_warning_threshold = floor_warning_threshold if floor_lift_threshold is None else floor_lift_threshold
-        self.floor_target_value = floor_target_value if floor_lift_amount is None else floor_lift_amount
-        self.floor_probation_rounds = floor_probation_rounds
+        self.reputations = {}
+        # Map: {client_id: consecutive_good_rounds}
+        self.probation_list = {} 
         
-        # State counters for probation
-        self.probation_counts: Dict[str, int] = defaultdict(int)
-        
-        log(INFO, f"🛡️ ReputationSystem initialized. Init={self.initial_reputation}, AlphaDown={self.alpha_down}")
+        print(f"✅ ReputationSystem Initialized (Smart Probation Logic)")
+        print(f"   Rule: If R < {floor_warning_threshold} AND dropping -> Freeze for {probation_rounds} rounds.")
 
-    def initialize_client(self, client_id: int):
-        """Khởi tạo danh tiếng cho client mới."""
-        cid_str = str(client_id)
-        if cid_str not in self.reputations:
-            self.reputations[cid_str] = self.initial_reputation
-
-    def update(
-        self, 
-        client_id: int, 
-        gradient: any, # Unused direct gradient access, processing done via flags
-        median_gradient: any, 
-        is_flagged: bool, 
-        server_round: int
-    ) -> float:
-        """
-        Cập nhật danh tiếng sau mỗi vòng.
-        Trả về giá trị danh tiếng mới.
-        """
-        cid = str(client_id)
-        current_rep = self.reputations[cid]
-        
-        # --- BƯỚC 1: CẬP NHẬT EMA ---
-        if is_flagged:
-            # Phạt: Giảm nhanh
-            new_rep = (1 - self.alpha_down) * current_rep
-        else:
-            # Thưởng: Tăng chậm
-            # Performance score = 1.0 (vì đã clean)
-            new_rep = (1 - self.alpha_up) * current_rep + self.alpha_up * 1.0
-
-        # Kẹp giá trị [0, 1]
-        new_rep = max(0.0, min(1.0, new_rep))
-        
-        # --- BƯỚC 2: CƠ CHẾ NÂNG SÀN (PROBATION) ---
-        if new_rep < self.floor_warning_threshold:
-            if not is_flagged:
-                self.probation_counts[cid] += 1
-                if self.probation_counts[cid] >= self.floor_probation_rounds:
-                    log(INFO, f"🆙 Client {cid} passed probation ({self.floor_probation_rounds} rounds). Lift {new_rep:.2f} -> {self.floor_target_value}")
-                    new_rep = self.floor_target_value
-                    self.probation_counts[cid] = 0
+    def initialize_client(self, client_id: int, is_trusted: bool = False):
+        if client_id not in self.reputations:
+            if is_trusted:
+                self.reputations[client_id] = 1.0
             else:
-                self.probation_counts[cid] = 0
-        else:
-            if cid in self.probation_counts:
-                del self.probation_counts[cid]
-
-        self.reputations[cid] = new_rep
-        return new_rep
+                self.reputations[client_id] = 0.5 
 
     def get_reputation(self, client_id: int) -> float:
-        return self.reputations[str(client_id)]
+        return self.reputations.get(client_id, 0.5)
+
+    def update(self,
+               client_id: int,
+               gradient: np.ndarray,
+               grad_median: np.ndarray,
+               was_flagged: bool,
+               current_round: int,
+               baseline_deviation: float = 0.0) -> float:
+        """
+        Update reputation with Smart Probation Logic.
+        """
+        self.initialize_client(client_id)
+        current_rep = self.reputations[client_id]
         
+        # --- CASE 1: CLIENT ĐANG TRONG DANH SÁCH THEO DÕI ---
+        if client_id in self.probation_list:
+            if was_flagged:
+                # Nếu hư trong lúc thử thách: Reset bộ đếm về 0
+                self.probation_list[client_id] = 0
+                print(f"   Client {client_id} (Probation): Bad behavior! Counter reset to 0.")
+                
+                # Vẫn tính phạt để giảm điểm tiếp (răn đe)
+                delta = -self.penalty_flagged
+                alpha = self.ema_alpha_decrease
+                new_rep = current_rep + alpha * delta
+                new_rep = max(0.0, min(1.0, new_rep))
+                self.reputations[client_id] = new_rep
+                return new_rep
+            else:
+                # Nếu ngoan: Tăng bộ đếm
+                self.probation_list[client_id] += 1
+                count = self.probation_list[client_id]
+                
+                if count >= self.probation_rounds:
+                    # Đủ 5 vòng -> Thoát Probation (Unlock)
+                    del self.probation_list[client_id]
+                    print(f"   Client {client_id}: 🎉 Exited Probation after {self.probation_rounds} good rounds.")
+                    # Trả về điểm hiện tại (để vòng sau bắt đầu tăng)
+                    return current_rep
+                else:
+                    # Chưa đủ -> Đóng băng (Freeze)
+                    # Không cộng điểm thưởng, giữ nguyên điểm cũ
+                    return current_rep
+
+        # --- CASE 2: CLIENT BÌNH THƯỜNG (CẬP NHẬT EMA) ---
+        # 1. Base Delta
+        if was_flagged:
+            delta = -self.penalty_flagged
+            alpha = self.ema_alpha_decrease
+        else:
+            delta = self.reward_clean
+            alpha = self.ema_alpha_increase
+        
+        # 2. Variance Penalty
+        dist = np.linalg.norm(gradient.flatten() - grad_median)
+        median_norm = np.linalg.norm(grad_median)
+        norm_dist = dist / (median_norm + 1e-10)
+        delta -= min(self.penalty_variance, norm_dist * self.penalty_variance)
+
+        # 3. Baseline Penalty
+        if baseline_deviation > 0.3:
+            delta -= 0.1
+        
+        # 4. Calculate New Reputation
+        new_rep = current_rep + alpha * delta
+        new_rep = max(0.0, min(1.0, new_rep))
+        
+        # 5. Check Entry to Probation (CRITICAL FIX)
+        # Chỉ vào tù nếu điểm thấp dưới ngưỡng VÀ điểm đang giảm (bị phạt).
+        # Nếu điểm thấp (<0.2) nhưng đang tăng (do vừa thoát tù), thì KHÔNG bắt lại.
+        is_dropping = (new_rep < current_rep)
+        
+        if new_rep < self.floor_warning_threshold and is_dropping and client_id not in self.probation_list:
+            self.probation_list[client_id] = 0
+            print(f"   Client {client_id}: 🚨 Entered Probation (R={new_rep:.3f} < {self.floor_warning_threshold})")
+        
+        self.reputations[client_id] = new_rep
+        return new_rep
+
     def get_stats(self) -> Dict:
-        reps = list(self.reputations.values())
+        if not self.reputations: return {}
+        vals = list(self.reputations.values())
         return {
-            "mean_reputation": sum(reps) / len(reps) if reps else 0.0,
-            "min_reputation": min(reps) if reps else 0.0,
-            "max_reputation": max(reps) if reps else 0.0,
-            "clients_in_probation": len(self.probation_counts)
+            'mean_reputation': np.mean(vals), 
+            'min': np.min(vals), 
+            'max': np.max(vals),
+            'clients_in_probation': len(self.probation_list)
         }
