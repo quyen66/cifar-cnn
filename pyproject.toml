@@ -209,7 +209,7 @@ soft-enabled = true
 # EMA (Exponential Moving Average)
 # PDF nói "α↓ < α↑" nhưng không cho giá trị cụ thể
 ema-alpha-increase = 0.15
-ema-alpha-decrease = 0.5
+ema-alpha-decrease = 0.2
 
 # Penalties
 penalty-flagged = 0.2
@@ -226,7 +226,7 @@ floor-probation-rounds = 5
 floor-target-value = 0.3
 
 # Initial Reputation
-initial-reputation = 0.1
+initial-reputation = 0.5
 
 # =====================================================================
 # DEFENSE PARAMETERS - MODE CONTROLLER

@@ -144,8 +144,8 @@ class HWeightTestRunnerNonIID:
         """Parse metrics from Flower output (SMART VERSION)."""
         metrics = {
             'final_accuracy': None,
-            'detection_rate': None,
-            'false_positive_rate': None,
+            'detection_rate': None,     # Sẽ tính từ TP/FN
+            'false_positive_rate': None, # Sẽ tính từ FP/TN
             'true_positives': None,
             'false_positives': None,
             'true_negatives': None,
@@ -170,9 +170,9 @@ class HWeightTestRunnerNonIID:
                     metrics['final_accuracy'] = float(all_accs[-1])
                     break
         
-        # 2. Parse Metrics (TP, FP, TN, FN)
-        # Cách 1: Tìm đầy đủ (Log mới sau khi sửa server_app.py)
+        # 2. Parse Metrics (TP, FP, TN, FN) - ƯU TIÊN TÌM DÒNG METRICS CUỐI CÙNG
         for line in reversed(lines):
+            # Regex khớp với log: "TP=4, FP=2, FN=8, TN=26"
             match = re.search(r'TP=(\d+),\s*FP=(\d+),\s*FN=(\d+),\s*TN=(\d+)', line)
             if match:
                 metrics['true_positives'] = int(match.group(1))
@@ -202,27 +202,31 @@ class HWeightTestRunnerNonIID:
                     metrics['true_negatives'] = max(0, total_benign - fp)
                     break
 
-        # 3. Detection Rate & FPR (Parse trực tiếp cho chính xác)
-        for line in reversed(lines):
-            if 'Detect=' in line: # Format mới
-                match = re.search(r'Detect=(\d+\.?\d*)%', line)
-                if match: metrics['detection_rate'] = float(match.group(1)) / 100.0
-            elif 'Detection:' in line: # Format cũ
-                match = re.search(r'Detection:\s*(\d+\.?\d*)%', line)
-                if match: metrics['detection_rate'] = float(match.group(1)) / 100.0
-                
-        for line in reversed(lines):
-            if 'FPR=' in line: # Format mới
-                match = re.search(r'FPR=(\d+\.?\d*)%', line)
-                if match: metrics['false_positive_rate'] = float(match.group(1)) / 100.0
-            elif 'FPR:' in line: # Format cũ
-                match = re.search(r'FPR:\s*(\d+\.?\d*)%', line)
-                if match: metrics['false_positive_rate'] = float(match.group(1)) / 100.0
+        # 3. FIX: TỰ TÍNH DETECTION RATE & FPR TỪ CÁC GIÁ TRỊ ĐÃ PARSE
+        # Thay vì regex tìm text "Detect=", ta tính toán trực tiếp cho chính xác
+        tp = metrics['true_positives']
+        fn = metrics['false_negatives']
+        fp = metrics['false_positives']
+        tn = metrics['true_negatives']
+
+        if tp is not None and fn is not None:
+            # Detection Rate = Recall = TP / (TP + FN)
+            if (tp + fn) > 0:
+                metrics['detection_rate'] = tp / (tp + fn)
+            else:
+                metrics['detection_rate'] = 0.0
+        
+        if fp is not None and tn is not None:
+            # False Positive Rate = FP / (TN + FP)
+            if (tn + fp) > 0:
+                metrics['false_positive_rate'] = fp / (tn + fp)
+            else:
+                metrics['false_positive_rate'] = 0.0
 
         # 4. H Score
         h_scores = []
         for line in lines:
-            match = re.search(r'Heterogeneity:\s*H\s*=\s*(\d+\.?\d*)', line)
+            match = re.search(r'Heterogeneity Score H\s*=\s*(\d+\.?\d*)', line)
             if match:
                 try: h_scores.append(float(match.group(1)))
                 except: continue
