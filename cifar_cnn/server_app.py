@@ -116,8 +116,7 @@ class FullPipelineStrategy(FedProx):
             ema_alpha_increase=rep_params.get('ema_alpha_increase', 0.4),
             ema_alpha_decrease=rep_params.get('ema_alpha_decrease', 0.2),
             penalty_flagged=rep_params.get('penalty_flagged', 0.2),
-            penalty_variance=rep_params.get('penalty_variance', 0.1),
-            reward_clean=rep_params.get('reward_clean', 0.1),
+            #reward_clean=rep_params.get('reward_clean', 0.1),
             floor_warning_threshold=rep_params.get('floor_warning_threshold', 0.2),
             probation_rounds=rep_params.get('probation_rounds', 5),
             initial_reputation=rep_params.get('initial_reputation', 0.8)
@@ -271,7 +270,7 @@ class FullPipelineStrategy(FedProx):
         for i, cid in enumerate(cids):
             self.reputation_system.update(
                 cid, gradients[i], grad_median, combined_flags.get(cid, False), server_round, 
-                baseline_deviation=base_devs.get(cid, 0.0)
+                baseline_deviation=base_devs.get(cid, 0.0), heterogeneity_score=H
             )
         
         # Log Stats
@@ -430,8 +429,8 @@ def server_fn(context: Context) -> ServerAppComponents:
             'ema_alpha_increase': context.run_config.get("defense.reputation.ema-alpha-increase", 0.4),
             'ema_alpha_decrease': context.run_config.get("defense.reputation.ema-alpha-decrease", 0.2),
             'penalty_flagged': context.run_config.get("defense.reputation.penalty-flagged", 0.2),
-            'penalty_variance': context.run_config.get("defense.reputation.penalty-variance", 0.1),
-            'reward_clean': context.run_config.get("defense.reputation.reward-clean", 0.1),
+            #'penalty_variance': context.run_config.get("defense.reputation.penalty-variance", 0.1),
+            #'reward_clean': context.run_config.get("defense.reputation.reward-clean", 0.1),
             # Correct mapping for updated Probation logic
             'floor_warning_threshold': context.run_config.get("defense.reputation.floor-warning-threshold", 0.2),
             'probation_rounds': context.run_config.get("defense.reputation.floor-probation-rounds", 5),
@@ -441,10 +440,9 @@ def server_fn(context: Context) -> ServerAppComponents:
         defense_params['mode'] = {
             'threshold_normal_to_alert': context.run_config.get("defense.mode.threshold-normal-to-alert", 0.20),
             'threshold_alert_to_defense': context.run_config.get("defense.mode.threshold-alert-to-defense", 0.30),
-            'hysteresis_normal': context.run_config.get("defense.mode.hysteresis-normal", 0.10),
-            'hysteresis_defense': context.run_config.get("defense.mode.hysteresis-defense", 0.15),
             'rep_gate_defense': context.run_config.get("defense.mode.rep-gate-defense", 0.5),
-            'initial_mode': context.run_config.get("defense.mode.initial-mode", "NORMAL")
+            'initial_mode': context.run_config.get("defense.mode.initial-mode", "NORMAL"),
+            'warmup_rounds': warmup_rounds
         }
     
     config_metadata = {

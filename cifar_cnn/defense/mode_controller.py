@@ -7,48 +7,41 @@ import numpy as np
 
 class ModeController:
     """
-    Điều khiển chế độ hoạt động của hệ thống phòng thủ.
+    Điều khiển chế độ hoạt động (Strict PDF Version).
     
-    Cơ chế: 
-    1. Warmup (Vòng 1-10): Mặc định NORMAL (giả định Trusted Initialization).
-    2. Reputation Gate: Nếu >= 3 client uy tín bị flag -> Force DEFENSE.
-    3. Threat Ratio: Chuyển đổi NORMAL <-> ALERT <-> DEFENSE dựa trên rho và hysteresis.
+    Cơ chế chuẩn theo PDF:
+    1. Mode Decision: Dựa trên ngưỡng cứng của Threat Ratio (rho).
+    2. Hysteresis (Trễ thời gian): Chỉ chuyển mode nếu ổn định >= 2 vòng.
+    3. Reputation Gates: Emergency Override 
     """
     
     def __init__(
         self,
         threshold_normal_to_alert: float = 0.15,
         threshold_alert_to_defense: float = 0.30,
-        hysteresis_normal: float = 0.05,
-        hysteresis_defense: float = 0.10,
+        stability_required: int = 2, 
         initial_mode: str = "NORMAL", 
         warmup_rounds: int = 10,
-        rep_gate_defense: float = 0.5
+        rep_gate_defense: float = 0.05 # Gate 2 drop threshold
     ):
         self.threshold_normal = threshold_normal_to_alert
         self.threshold_defense = threshold_alert_to_defense
-        self.hysteresis_normal = hysteresis_normal
-        self.hysteresis_defense = hysteresis_defense
+        self.stability_required = stability_required
         self.warmup_rounds = warmup_rounds
         
-        # Ngưỡng sụt giảm danh tiếng (PDF: 0.05 tức 5%)
-        # Nếu config truyền vào 0.5 (sai), code sẽ dùng giá trị đó. 
-        # Khuyên bạn nên sửa config thành 0.05.
+        # Reputation Gates
         self.rep_drop_threshold = rep_gate_defense 
-        
-        # Ngưỡng xác định client uy tín (PDF: 0.85)
         self.high_rep_threshold = 0.85 
         
         self.current_mode = initial_mode
-        self.mode_history = []
+        self.suggested_mode_history = [] # Lưu lịch sử đề xuất để check ổn định
         
-        # Lưu trữ danh tiếng trung bình của vòng trước để so sánh (Gate 2)
-        self.last_avg_rep = 0.5 # Giá trị khởi tạo giả định
+        # Lưu trữ danh tiếng trung bình
+        self.last_avg_rep = 0.5 
         
-        log(INFO, f"🎛️ ModeController initialized.")
-        log(INFO, f"   Warmup: {warmup_rounds} rounds")
-        log(INFO, f"   Gate 1 (High Rep): Threshold > {self.high_rep_threshold}")
-        log(INFO, f"   Gate 2 (Rep Drop): Threshold > {self.rep_drop_threshold:.2f} (Target: 0.05)")
+        log(INFO, f"🎛️ ModeController initialized (PDF Logic).")
+        log(INFO, f"   Hysteresis: Require {self.stability_required} stable rounds")
+        log(INFO, f"   Thresholds: NORMAL <= {self.threshold_normal} < ALERT <= {self.threshold_defense} < DEFENSE")
 
     def update_mode(
         self, 
@@ -57,85 +50,73 @@ class ModeController:
         reputations: Dict[int, float],
         current_round: int
     ) -> str:
-        """
-        Quyết định chế độ dựa trên threat_ratio (rho), danh tiếng và giai đoạn huấn luyện.
-        """
         
-        # --- 1. Giai đoạn Warmup / Trusted Initialization (PDF Trang 13) ---
+        # --- 1. Giai đoạn Warmup ---
         if current_round <= self.warmup_rounds:
             self.current_mode = "NORMAL"
-            self.mode_history.append("NORMAL")
-            # Cập nhật avg rep để chuẩn bị cho các vòng sau
+            self.suggested_mode_history.append("NORMAL")
             if reputations:
                 self.last_avg_rep = np.mean(list(reputations.values()))
             return "NORMAL"
 
-        # --- 2. Reputation Gate 1: High Rep Clients Flagged (PDF Trang 12) ---
-        high_rep_flagged_count = 0
-        for client_id in detected_clients:
-            rep = reputations.get(client_id, 0.5)
-            if rep > self.high_rep_threshold:
-                high_rep_flagged_count += 1
+        # --- 2. Reputation Gates (Emergency Override) ---
+        # Gate 1: High Rep Clients Flagged
+        high_rep_flagged_count = sum(1 for cid in detected_clients if reputations.get(cid, 0) > self.high_rep_threshold)
         
         if high_rep_flagged_count >= 3:
-            self._set_defense_mode("🚨 [GATE 1] >= 3 Trusted Clients Flagged")
+            self._force_switch("DEFENSE", "🚨 [GATE 1] >= 3 Trusted Clients Flagged")
             self._update_last_avg(reputations)
             return "DEFENSE"
 
-        # --- 3. Reputation Gate 2: Average Reputation Drop (PDF Trang 12) ---
-        # Tính R_bar_t (Danh tiếng trung bình hiện tại)
+        # Gate 2: Reputation Drop
         current_avg_rep = np.mean(list(reputations.values())) if reputations else 0.5
-        
-        # Tránh chia cho 0
+        drop_rate = 0.0
         if self.last_avg_rep > 1e-6:
             drop_rate = (self.last_avg_rep - current_avg_rep) / self.last_avg_rep
-        else:
-            drop_rate = 0.0
             
-        # Kiểm tra sụt giảm > 0.05 (5%)
         if drop_rate > self.rep_drop_threshold:
-            self._set_defense_mode(f"📉 [GATE 2] Rep Drop {drop_rate:.1%} > {self.rep_drop_threshold:.1%}")
+            self._force_switch("DEFENSE", f"📉 [GATE 2] Rep Drop {drop_rate:.1%} > {self.rep_drop_threshold:.1%}")
             self.last_avg_rep = current_avg_rep
             return "DEFENSE"
 
-        # Cập nhật last_avg_rep cho vòng kế tiếp
         self.last_avg_rep = current_avg_rep
 
-        # --- 4. Logic Hysteresis dựa trên Threat Ratio (Bình thường) ---
-        next_mode = self.current_mode
+        # --- 3. Mode Suggestion (Based on Rho) ---
+        if threat_ratio <= self.threshold_normal:
+            suggested_mode = "NORMAL"
+        elif threat_ratio <= self.threshold_defense:
+            suggested_mode = "ALERT"
+        else:
+            suggested_mode = "DEFENSE"
+            
+        self.suggested_mode_history.append(suggested_mode)
         
-        if self.current_mode == "NORMAL":
-            if threat_ratio > self.threshold_normal:
-                next_mode = "ALERT"
-                log(INFO, f"⚠️ Threat {threat_ratio:.2f} > {self.threshold_normal}. Switch NORMAL -> ALERT")
-        
-        elif self.current_mode == "ALERT":
-            if threat_ratio > self.threshold_defense:
-                next_mode = "DEFENSE"
-                log(INFO, f"🚨 Threat {threat_ratio:.2f} > {self.threshold_defense}. Switch ALERT -> DEFENSE")
-            elif threat_ratio <= (self.threshold_normal - self.hysteresis_normal):
-                next_mode = "NORMAL"
-                log(INFO, f"✅ Threat {threat_ratio:.2f} low enough. Switch ALERT -> NORMAL")
-                
-        elif self.current_mode == "DEFENSE":
-            if threat_ratio <= (self.threshold_defense - self.hysteresis_defense):
-                next_mode = "ALERT"
-                log(INFO, f"⚠️ Threat {threat_ratio:.2f} decreased. Switch DEFENSE -> ALERT")
-        
-        # Cập nhật trạng thái
-        self.current_mode = next_mode
-        self.mode_history.append(next_mode)
-        
-        return next_mode
+        # --- 4. Hysteresis Check (Time-based Stability) ---
+        # Kiểm tra xem mode đề xuất có giống nhau trong N vòng gần nhất không
+        if len(self.suggested_mode_history) >= self.stability_required:
+            recent_suggestions = self.suggested_mode_history[-self.stability_required:]
+            if all(m == suggested_mode for m in recent_suggestions):
+                # Ổn định -> Chấp nhận chuyển mode
+                if self.current_mode != suggested_mode:
+                    log(INFO, f"🔄 Mode stable for {self.stability_required} rounds. Switching {self.current_mode} -> {suggested_mode} (rho={threat_ratio:.2f})")
+                self.current_mode = suggested_mode
+            else:
+                # Chưa ổn định -> Giữ mode cũ
+                log(INFO, f"⏳ Threat unstable ({suggested_mode}). Holding {self.current_mode}.")
+                pass
+        else:
+            # Chưa đủ lịch sử -> Chấp nhận luôn (hoặc giữ mặc định)
+            self.current_mode = suggested_mode
+            
+        return self.current_mode
 
-    def _set_defense_mode(self, reason: str):
-        """Helper để force chuyển sang DEFENSE và log lý do."""
-        self.current_mode = "DEFENSE"
-        self.mode_history.append("DEFENSE")
-        log(INFO, f"{reason} -> Force Switch to DEFENSE")
+    def _force_switch(self, mode, reason):
+        self.current_mode = mode
+        # Reset lịch sử để tránh hysteresis block việc chuyển khẩn cấp này
+        self.suggested_mode_history.append(mode)
+        log(INFO, f"{reason} -> Force Switch to {mode}")
 
     def _update_last_avg(self, reputations):
-        """Helper để cập nhật avg rep."""
         if reputations:
             self.last_avg_rep = np.mean(list(reputations.values()))
 
@@ -143,5 +124,5 @@ class ModeController:
         return {
             "current_mode": self.current_mode,
             "last_avg_rep": self.last_avg_rep,
-            "mode_history_last_10": self.mode_history[-10:]
+            "rho_thresholds": (self.threshold_normal, self.threshold_defense)
         }

@@ -137,11 +137,10 @@ cosine-threshold = 0.3
 # =====================================================================
 # Formula: H = weight-cv × H_CV + weight-sim × H_sim + weight-cluster × H_cluster
 # Constraint: weight-cv + weight-sim + weight-cluster = 1.0
-# Default values from main.pdf: (0.4, 0.4, 0.2)
 # =====================================================================
 
-weight-cv = 0.4
-weight-sim = 0.4
+weight-cv = 0.5
+weight-sim = 0.3
 weight-cluster = 0.2
 
 # =====================================================================
@@ -213,17 +212,16 @@ ema-alpha-decrease = 0.2
 
 # Penalties
 penalty-flagged = 0.2
-penalty-variance = 0.1
+#penalty-variance = 0.1
 
 # Rewards
 reward-clean = 0.1
 
 # Floor Lifting Mechanism (Probation-based)
 # Nếu Reputation < warning-threshold, vào chế độ Probation.
-# Nếu tốt trong 'probation-rounds' liên tiếp -> Reset Reputation về 'target-value'
+# Nếu tốt trong 'probation-rounds' liên tiếp -> tiếp tục tính theo EMA
 floor-warning-threshold = 0.2
 floor-probation-rounds = 5
-floor-target-value = 0.3
 
 # Initial Reputation
 initial-reputation = 0.5
@@ -243,8 +241,8 @@ threshold-normal-to-alert = 0.15
 threshold-alert-to-defense = 0.30
 
 # Hysteresis (tránh dao động giữa các modes)
-hysteresis-normal = 0.05
-hysteresis-defense = 0.15
+#hysteresis-normal = 0.05
+#hysteresis-defense = 0.15
 
 # Reputation Gates (điều kiện để chuyển vào DEFENSE)
 rep-gate-defense = 0.1
