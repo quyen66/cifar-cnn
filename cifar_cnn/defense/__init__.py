@@ -1,10 +1,12 @@
 from .layer1_dbscan import Layer1Detector
 from .layer2_detection import Layer2Detector
-from .noniid_handler import NonIIDHandler  # FIXED
-from .filtering import TwoStageFilter  # FIXED
+from .noniid_handler import NonIIDHandler
+from .scoring import ConfidenceScorer        
+from .filtering import TwoStageFilter
 from .reputation import ReputationSystem
 from .mode_controller import ModeController
 from .aggregation import (
+    Aggregator,                            
     weighted_average_aggregation,
     trimmed_mean_aggregation,
     coordinate_median_aggregation,
@@ -12,38 +14,39 @@ from .aggregation import (
 )
 
 __all__ = [
-    # Detection layers
+    # 1. Detection Layers
     'Layer1Detector',
     'Layer2Detector',
     
-    # Non-IID handling (FIXED)
+    # 2. Analysis & Scoring
     'NonIIDHandler',
+    'ConfidenceScorer', 
     
-    # Filtering (FIXED)
+    # 3. Filtering
     'TwoStageFilter',
     
-    # Reputation system
+    # 4. Reputation & Mode
     'ReputationSystem',
-    
-    # Mode control
     'ModeController',
     
-    # Aggregation methods
+    # 5. Aggregation
+    'Aggregator',      
     'weighted_average_aggregation',
     'trimmed_mean_aggregation',
     'coordinate_median_aggregation',
     'aggregate_by_mode'
 ]
 
-# Version info
-__version__ = '1.0.1-fixed'
-__status__ = 'Production (Fixed)'
+# Version info updated to match pyproject.toml
+__version__ = '2.0.0'
+__status__ = 'Production (Soft Pipeline V2)'
 
 print(f"✅ Defense package loaded: v{__version__} ({__status__})")
-print(f"   - Layer1Detector: Enhanced DBSCAN")
-print(f"   - Layer2Detector: Distance + Direction")
-print(f"   - NonIIDHandler: WITH Baseline Tracking ✓")
-print(f"   - TwoStageFilter: WITH Adaptive Thresholds ✓")
-print(f"   - ReputationSystem: Asymmetric EMA")
-print(f"   - ModeController: 3-mode switching")
-print(f"   - Aggregation: Mode-adaptive methods")
+print(f"   1. Layer1Detector: Enhanced DBSCAN (Hard Kill)")
+print(f"   2. Layer2Detector: Distance + Direction (Redemption)")
+print(f"   3. NonIIDHandler: Heterogeneity Analysis (H, δi)")
+print(f"   4. ConfidenceScorer: Anomaly Scoring (ci calculation)")
+print(f"   5. TwoStageFilter: Adaptive Thresholds (Hard/Soft)")
+print(f"   6. ReputationSystem: Asymmetric EMA & Adaptive Penalty")
+print(f"   7. ModeController: 3-mode Switching (Normal/Alert/Defense)")
+print(f"   8. Aggregator: Mode-adaptive Aggregation")

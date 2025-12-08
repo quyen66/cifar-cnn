@@ -1,294 +1,501 @@
 """
-Non-IID Handler (VERIFIED & ENHANCED)
-======================================
-Xử lý non-IID data để giảm false positives.
+Non-IID Handler (main.pdf Spec)
+================================
+Xử lý dữ liệu không đồng nhất để giảm false positives.
 
-Components:
-- Heterogeneity Score (H): Đo mức độ non-IID
-- Adaptive Thresholds: Điều chỉnh thresholds dựa trên H
-- Baseline Tracking: Track gradient history để detect drift
+Components theo PDF:
+1. Heterogeneity Score (H): Đo mức độ non-IID
+   H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+
+2. Adaptive Threshold (θ_adj): Điều chỉnh ngưỡng dựa trên H
+   θ_adj = clip(θbase + (H - 0.5) × 0.4, 0.5, 0.9)
+
+3. Baseline Deviation (δi): Track hành vi từng client
+   δi = 0.5 × |∥gi∥ - n̄i| / σn,i + 0.5 × (1 - Cosine(gi, ḡ_hist_i))
 
 ALL PARAMETERS ARE CONFIGURABLE VIA CONSTRUCTOR (loaded from pyproject.toml)
-
-VERIFIED: Các hàm đã được kiểm tra hoạt động đúng logic trong PDF.
 """
 
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 from collections import deque
+from dataclasses import dataclass
+
+
+@dataclass
+class ClientHistory:
+    """Lịch sử gradient của một client."""
+    norms: deque  # Lịch sử ||g||
+    running_mean_grad: Optional[np.ndarray]  # Running average của gradient (normalized)
+    update_count: int  # Số lần cập nhật
 
 
 class NonIIDHandler:
-    """Non-IID handler với configurable parameters (VERIFIED)."""
+    """
+    Non-IID Handler theo main.pdf spec.
     
-    def __init__(self,
-             h_threshold_normal: float = 0.6,
-             h_threshold_alert: float = 0.5,
-             adaptive_multiplier: float = 1.5,
-             adjustment_factor: float = 0.4,
-             baseline_percentile: int = 60,
-             baseline_window_size: int = 10,
-             delta_norm_weight: float = 0.5,
-             delta_direction_weight: float = 0.5,
-             weight_cv: float = 0.4,           
-             weight_sim: float = 0.4,          
-             weight_cluster: float = 0.2): 
+    Chức năng chính:
+    1. Tính H score để đo độ heterogeneity
+    2. Tính θ_adj (adaptive threshold) theo công thức PDF
+    3. Track baseline deviation δi cho từng client
+    """
+    
+    def __init__(
+        self,
+        # H Score weights (phải sum = 1.0)
+        weight_cv: float = 0.4,
+        weight_sim: float = 0.4,
+        weight_cluster: float = 0.2,
+        # θ_adj parameters (theo PDF)
+        adjustment_factor: float = 0.4,  # Hệ số trong công thức θ_adj
+        theta_adj_clip_min: float = 0.5,  # Min của θ_adj
+        theta_adj_clip_max: float = 0.9,  # Max của θ_adj
+        # Baseline tracking
+        baseline_window_size: int = 10,  # Số vòng lưu lịch sử
+        # δi weights (theo PDF: 0.5 và 0.5)
+        delta_norm_weight: float = 0.5,
+        delta_direction_weight: float = 0.5,
+        # EMA decay cho running mean gradient
+        grad_ema_decay: float = 0.3
+    ):
         """
-        Initialize Non-IID Handler with configurable parameters.
+        Initialize Non-IID Handler.
         
         Args:
-            h_threshold_normal: H threshold for NORMAL mode
-            h_threshold_alert: H threshold for ALERT mode
-            adaptive_multiplier: Multiplier for adaptive thresholds when H high
-            adjustment_factor: Factor trong công thức θ_adj = θ_base + (H-0.5) × factor
-            baseline_percentile: Percentile for baseline computation
-            baseline_window_size: Window size for gradient history
-            delta_norm_weight: Weight cho norm deviation trong δi calculation
-            delta_direction_weight: Weight cho direction deviation trong δi calculation
-            weight_cv: Weight for H_CV component in H score
-            weight_sim: Weight for H_sim component in H score
-            weight_cluster: Weight for H_cluster component in H score
+            weight_cv: Weight cho H_CV (default: 0.4)
+            weight_sim: Weight cho H_sim (default: 0.4)
+            weight_cluster: Weight cho H_cluster (default: 0.2)
+            adjustment_factor: Hệ số trong θ_adj = θbase + (H-0.5)×factor
+            theta_adj_clip_min: Min clip cho θ_adj (default: 0.5)
+            theta_adj_clip_max: Max clip cho θ_adj (default: 0.9)
+            baseline_window_size: Số vòng lưu lịch sử norm
+            delta_norm_weight: Weight cho phần norm trong δi
+            delta_direction_weight: Weight cho phần direction trong δi
+            grad_ema_decay: Decay rate cho running mean gradient
         """
-        self.h_threshold_normal = h_threshold_normal
-        self.h_threshold_alert = h_threshold_alert
-        self.adaptive_multiplier = adaptive_multiplier
-        self.adjustment_factor = adjustment_factor  
-        self.baseline_percentile = baseline_percentile
-        self.baseline_window_size = baseline_window_size
-        self.delta_norm_weight = delta_norm_weight  
-        self.delta_direction_weight = delta_direction_weight  
-        self.weight_cv = weight_cv
-        self.weight_sim = weight_sim
-        self.weight_cluster = weight_cluster
-
-        # Validate H weights sum to 1.0
+        # Validate H weights
         h_weight_sum = weight_cv + weight_sim + weight_cluster
         if abs(h_weight_sum - 1.0) > 1e-6:
             raise ValueError(
                 f"H weights must sum to 1.0, got {h_weight_sum:.6f} "
                 f"(cv={weight_cv}, sim={weight_sim}, cluster={weight_cluster})"
             )
-            
-        # Client gradient history
-        self.client_gradients = {}
         
-        print(f"✅ NonIIDHandler initialized with params:")
+        # H Score weights
+        self.weight_cv = weight_cv
+        self.weight_sim = weight_sim
+        self.weight_cluster = weight_cluster
+        
+        # θ_adj parameters
+        self.adjustment_factor = adjustment_factor
+        self.theta_adj_clip_min = theta_adj_clip_min
+        self.theta_adj_clip_max = theta_adj_clip_max
+        
+        # Baseline tracking
+        self.baseline_window_size = baseline_window_size
+        self.delta_norm_weight = delta_norm_weight
+        self.delta_direction_weight = delta_direction_weight
+        self.grad_ema_decay = grad_ema_decay
+        
+        # Client histories: Dict[client_id, ClientHistory]
+        self.client_histories: Dict[int, ClientHistory] = {}
+        
+        # Last computed H score
+        self.last_h_score: float = 0.0
+        
+        print(f"✅ NonIIDHandler initialized (main.pdf spec):")
         print(f"   H weights: CV={weight_cv}, sim={weight_sim}, cluster={weight_cluster}")
-        print(f"   H thresholds: normal={h_threshold_normal}, alert={h_threshold_alert}")
-        print(f"   Adaptive multiplier: {adaptive_multiplier}")
-        print(f"   Adjustment factor: {adjustment_factor}")
-        print(f"   Baseline: percentile={baseline_percentile}, window={baseline_window_size}")
-        print(f"   Delta weights: norm={delta_norm_weight}, direction={delta_direction_weight}")
+        print(f"   θ_adj formula: clip(θbase + (H-0.5)×{adjustment_factor}, {theta_adj_clip_min}, {theta_adj_clip_max})")
+        print(f"   δi weights: norm={delta_norm_weight}, direction={delta_direction_weight}")
+        print(f"   Baseline window: {baseline_window_size} rounds")
+
+    # =========================================================================
+    # HETEROGENEITY SCORE (H)
+    # =========================================================================
     
-    def compute_heterogeneity_score(self, 
-                                    gradients: List[np.ndarray],
-                                    client_ids: List[int]) -> float:
+    def compute_heterogeneity_score(
+        self,
+        gradients: List[np.ndarray],
+        client_ids: List[int]
+    ) -> float:
         """
-        Compute heterogeneity score H with ROBUST PRE-FILTERING.
-        Fix: Loại bỏ 20% gradient xa Median nhất trước khi tính H để tránh bị thao túng.
+        Tính Heterogeneity Score H với robust pre-filtering.
+        
+        Formula (PDF):
+            H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+        
+        Pre-filtering: Loại 30% gradient xa median nhất để tránh bị thao túng.
+        
+        Args:
+            gradients: List of gradient arrays
+            client_ids: List of client IDs
+            
+        Returns:
+            H score trong [0, 1]
         """
         n = len(gradients)
-        if n < 3: return 0.0 # Quá ít để lọc
+        if n < 3:
+            self.last_h_score = 0.0
+            return 0.0
         
-        # --- BƯỚC VÁ LỖI: LỌC THÔ (TRIMMED) ---
-        # 1. Gom tất cả gradient lại
+        # === ROBUST PRE-FILTERING ===
+        # Loại 30% gradient xa median nhất (vì max attack ratio = 30%)
         grad_matrix = np.vstack([g.flatten() for g in gradients])
-        
-        # 2. Tính Median toàn cục của vòng này
         g_median = np.median(grad_matrix, axis=0)
         
-        # 3. Tính khoảng cách từ mỗi client tới Median
         dists_to_median = np.linalg.norm(grad_matrix - g_median, axis=1)
         
-        # 4. Giữ lại 70% client gần Median nhất (Loại 30% nghi ngờ là rác/tấn công vì max attack ratio là 30%)
         keep_ratio = 0.7
-        num_keep = int(n * keep_ratio)
-        if num_keep < 2: num_keep = n # Fallback nếu ít client quá
-            
-        # Lấy index của các phần tử có khoảng cách nhỏ nhất
+        num_keep = max(2, int(n * keep_ratio))
+        
         sorted_indices = np.argsort(dists_to_median)
         safe_indices = sorted_indices[:num_keep]
-        
-        # 5. Tạo tập dữ liệu "Sạch tương đối" để tính H
-        # Chỉ tính toán trên tập này
         safe_grad_matrix = grad_matrix[safe_indices]
         n_safe = len(safe_grad_matrix)
         
-        # --- TỪ ĐÂY TÍNH H NHƯ CŨ NHƯNG TRÊN safe_grad_matrix ---
+        # === TÍNH H COMPONENTS TRÊN TẬP SẠch ===
         
-        # 1. H_CV (Dùng safe_grad_matrix)
+        # 1. H_CV: Coefficient of Variation của distances
+        H_CV = self._compute_h_cv(safe_grad_matrix)
+        
+        # 2. H_sim: Dissimilarity dựa trên cosine
+        H_sim = self._compute_h_sim(safe_grad_matrix)
+        
+        # 3. H_cluster: Cluster dispersion (simplified)
+        H_cluster = self._compute_h_cluster(safe_grad_matrix)
+        
+        # Combine
+        H = (self.weight_cv * H_CV + 
+             self.weight_sim * H_sim + 
+             self.weight_cluster * H_cluster)
+        
+        H = np.clip(H, 0.0, 1.0)
+        self.last_h_score = H
+        
+        return H
+    
+    def _compute_h_cv(self, grad_matrix: np.ndarray) -> float:
+        """
+        Tính H_CV: Coefficient of Variation của pairwise distances.
+        
+        H_CV cao → distances vary nhiều → non-IID cao
+        """
+        n = len(grad_matrix)
+        if n < 2:
+            return 0.0
+        
+        # Pairwise distances
         distances = []
-        for i in range(n_safe):
-            for j in range(i + 1, n_safe):
-                dist = np.linalg.norm(safe_grad_matrix[i] - safe_grad_matrix[j])
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.linalg.norm(grad_matrix[i] - grad_matrix[j])
                 distances.append(dist)
         
-        if not distances: return 0.0
+        if not distances:
+            return 0.0
         
         mean_dist = np.mean(distances)
         std_dist = np.std(distances)
+        
+        # CV = std / mean (normalize to [0, 1])
         H_CV = min(1.0, std_dist / (mean_dist + 1e-10))
         
-        # 2. H_sim (Dùng safe_grad_matrix)
-        cosine_sims = []
-        norms = np.linalg.norm(safe_grad_matrix, axis=1)
+        return H_CV
+    
+    def _compute_h_sim(self, grad_matrix: np.ndarray) -> float:
+        """
+        Tính H_sim: Dissimilarity dựa trên cosine similarity.
         
-        for i in range(n_safe):
-            for j in range(i + 1, n_safe):
-                dot_product = np.dot(safe_grad_matrix[i], safe_grad_matrix[j])
-                sim = dot_product / (norms[i] * norms[j] + 1e-10)
+        H_sim cao → cosine similarities thấp → non-IID cao
+        """
+        n = len(grad_matrix)
+        if n < 2:
+            return 0.0
+        
+        norms = np.linalg.norm(grad_matrix, axis=1)
+        
+        cosine_sims = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                if norms[i] < 1e-9 or norms[j] < 1e-9:
+                    continue
+                dot_product = np.dot(grad_matrix[i], grad_matrix[j])
+                sim = dot_product / (norms[i] * norms[j])
                 cosine_sims.append(sim)
-                
-        mean_cosine_sim = np.mean(cosine_sims) if cosine_sims else 0.0
+        
+        if not cosine_sims:
+            return 0.0
+        
+        mean_cosine_sim = np.mean(cosine_sims)
+        
+        # Convert similarity to dissimilarity, normalize to [0, 1]
+        # sim ∈ [-1, 1] → dissim ∈ [0, 1]
         H_sim = np.clip((1.0 - mean_cosine_sim) / 2.0, 0.0, 1.0)
         
-        # 3. H_cluster (Simplified trên safe_grad_matrix)
-        # (Giữ nguyên logic cũ nhưng đổi biến đầu vào là safe_grad_matrix)
-        # ... (đoạn tính silhouette có thể giữ nguyên hoặc bỏ qua nếu thấy phức tạp) ...
-        # Để đơn giản và nhanh, bạn có thể tính H = 0.5*H_CV + 0.5*H_sim trên tập sạch này là đủ.
-        
-        # Kết hợp (Giữ nguyên trọng số)
-        H = self.weight_cv * H_CV + self.weight_sim * H_sim # + self.weight_cluster * H_cluster
-        
-        # Nếu bỏ qua H_cluster cho đơn giản (vì n_safe nhỏ), nhớ scale lại trọng số
-        # Hoặc giữ nguyên logic cũ nếu muốn chính xác tuyệt đối theo PDF
-        
-        return np.clip(H, 0.0, 1.0)
+        return H_sim
     
-    def get_adaptive_threshold(self, H: float, mode: str, base_threshold: float) -> float:
+    def _compute_h_cluster(self, grad_matrix: np.ndarray) -> float:
         """
-        Get adaptive threshold based on H score and mode.
+        Tính H_cluster: Cluster dispersion (simplified).
         
-        HYBRID: Combine mode-based thresholds với PDF formula
+        Dùng variance của distances to centroid.
+        """
+        n = len(grad_matrix)
+        if n < 2:
+            return 0.0
+        
+        centroid = np.mean(grad_matrix, axis=0)
+        distances_to_centroid = np.linalg.norm(grad_matrix - centroid, axis=1)
+        
+        # Normalize variance
+        mean_dist = np.mean(distances_to_centroid)
+        std_dist = np.std(distances_to_centroid)
+        
+        if mean_dist < 1e-9:
+            return 0.0
+        
+        # CV of distances to centroid
+        H_cluster = min(1.0, std_dist / (mean_dist + 1e-10))
+        
+        return H_cluster
+
+    # =========================================================================
+    # ADAPTIVE THRESHOLD (θ_adj)
+    # =========================================================================
+    
+    def compute_adaptive_threshold(self, H: float, theta_base: float) -> float:
+        """
+        Tính ngưỡng thích ứng theo công thức PDF.
+        
+        Formula (PDF Giai đoạn 3):
+            θ_adj = clip(θbase + (H - 0.5) × 0.4, 0.5, 0.9)
+        
+        Logic:
+        - H = 0.5 (trung bình) → θ_adj = θbase
+        - H > 0.5 (non-IID cao) → θ_adj > θbase (nới lỏng, dễ accept hơn)
+        - H < 0.5 (IID) → θ_adj < θbase (siết chặt, khó accept hơn)
         
         Args:
-            H: Heterogeneity score (0-1)
-            mode: Current mode (NORMAL/ALERT/DEFENSE)
-            base_threshold: Base threshold value
+            H: Heterogeneity score [0, 1]
+            theta_base: Base threshold (e.g., 0.85 for hard filter, 0.65 for soft)
+            
+        Returns:
+            Adaptive threshold θ_adj
+        """
+        # Công thức đúng theo PDF
+        theta_adj = theta_base + (H - 0.5) * self.adjustment_factor
         
+        # Clip theo range cho phép
+        theta_adj = np.clip(theta_adj, self.theta_adj_clip_min, self.theta_adj_clip_max)
+        
+        return theta_adj
+    
+    def get_adaptive_threshold(
+        self, 
+        H: float, 
+        mode: str, 
+        base_threshold: float
+    ) -> float:
+        """
+        Wrapper cho compute_adaptive_threshold (backward compatible).
+        
+        Args:
+            H: Heterogeneity score
+            mode: Current mode (NORMAL/ALERT/DEFENSE) - không dùng trong PDF formula
+            base_threshold: Base threshold
+            
         Returns:
             Adaptive threshold
         """
-        # Determine H threshold based on mode
-        if mode == 'NORMAL':
-            h_threshold = self.h_threshold_normal
-        elif mode == 'ALERT':
-            h_threshold = self.h_threshold_alert
-        else:  # DEFENSE
-            h_threshold = 0.4
-        
-        # If H > threshold → Apply PDF formula adjustment
-        if H > h_threshold:
-            # Use PDF formula: θ_adj = θ_base + (H - 0.5) × adjustment_factor
-            adjustment = (H - h_threshold) * self.adjustment_factor
-            adaptive_threshold = base_threshold + adjustment
-        else:
-            adaptive_threshold = base_threshold
-        
-        # Clip to reasonable range
-        adaptive_threshold = np.clip(adaptive_threshold, 0.3, 0.95)
-        
-        return adaptive_threshold
+        # PDF formula không phụ thuộc mode, chỉ phụ thuộc H
+        return self.compute_adaptive_threshold(H, base_threshold)
+
+    # =========================================================================
+    # BASELINE DEVIATION (δi)
+    # =========================================================================
     
     def update_client_gradient(self, client_id: int, gradient: np.ndarray):
         """
-        Update gradient history for a client.
-        OPTIMIZED: Only store gradient norm to save RAM (Solution 3).
+        Cập nhật lịch sử gradient cho client.
+        
+        Lưu trữ:
+        1. Lịch sử norm (để tính mean và std)
+        2. Running mean gradient normalized (để tính cosine với lịch sử)
+        
+        Args:
+            client_id: Client ID
+            gradient: Current gradient vector
         """
-        # Tính Norm (độ lớn) của gradient hiện tại
-        norm_val = float(np.linalg.norm(gradient))
+        g_flat = gradient.flatten()
+        norm_val = float(np.linalg.norm(g_flat))
         
-        # Khởi tạo deque nếu chưa có
-        if client_id not in self.client_gradients:
-            self.client_gradients[client_id] = deque(maxlen=self.baseline_window_size)
+        # Khởi tạo nếu chưa có
+        if client_id not in self.client_histories:
+            self.client_histories[client_id] = ClientHistory(
+                norms=deque(maxlen=self.baseline_window_size),
+                running_mean_grad=None,
+                update_count=0
+            )
         
-        # CHỈ LƯU NORM (số thực nhẹ), KHÔNG lưu cả vector gradient (nặng)
-        self.client_gradients[client_id].append(norm_val)
-
-    def compute_baseline_deviation(self, client_id: int, current_gradient: np.ndarray) -> float:
-        """
-        Compute deviation from client's baseline.
-        OPTIMIZED: Works with stored Norms instead of full vectors.
-        """
-        if client_id not in self.client_gradients:
-            return 0.0
+        history = self.client_histories[client_id]
         
-        # Lấy lịch sử (bây giờ là list các số thực Norm, không phải vector)
-        historical_norms = list(self.client_gradients[client_id])
+        # Cập nhật norm history
+        history.norms.append(norm_val)
         
-        if len(historical_norms) < 2:
-            return 0.0
-        
-        # Tính baseline từ lịch sử Norm có sẵn (không cần tính toán lại)
-        baseline = np.percentile(historical_norms, self.baseline_percentile)
-        
-        # Tính norm của gradient hiện tại để so sánh
-        current_norm = float(np.linalg.norm(current_gradient.flatten()))
-        
-        # Tránh lỗi chia cho 0
-        if baseline < 1e-9:
-            return 0.0
-            
-        # Tính độ lệch: |current - baseline| / baseline
-        deviation = abs(current_norm - baseline) / (baseline + 1e-10)
-        
-        return deviation
-    
-    def compute_baseline_deviation_detailed(self, 
-                                          client_id: int, 
-                                          current_gradient: np.ndarray,
-                                          grad_median: np.ndarray) -> Dict[str, float]:
-        """
-        Compute detailed baseline deviation (Norm + Direction).
-        OPTIMIZED: Works with stored Norms instead of full vectors.
-        """
-        # 1. Delta Norm (Dựa trên lịch sử Norm đã lưu)
-        if client_id not in self.client_gradients:
-            # Chưa có lịch sử thì deviation = 0
-            return {'delta_norm': 0.0, 'delta_direction': 0.0, 'delta_combined': 0.0}
-        
-        # Lấy lịch sử (bây giờ là list các số thực Norm, không phải vector)
-        historical_norms = list(self.client_gradients[client_id])
-        
-        if len(historical_norms) < 2:
-            return {'delta_norm': 0.0, 'delta_direction': 0.0, 'delta_combined': 0.0}
-            
-        # Tính baseline từ lịch sử Norm có sẵn (không cần tính toán lại)
-        baseline = np.percentile(historical_norms, self.baseline_percentile)
-        
-        # Tính norm của gradient hiện tại
-        current_norm = float(np.linalg.norm(current_gradient.flatten()))
-        
-        # Tránh lỗi chia cho 0
-        if baseline < 1e-9:
-            delta_norm = 0.0
+        # Cập nhật running mean gradient (normalized để tính direction)
+        if norm_val > 1e-9:
+            g_normalized = g_flat / norm_val
         else:
-            delta_norm = abs(current_norm - baseline) / (baseline + 1e-10)
+            g_normalized = g_flat
+        
+        if history.running_mean_grad is None:
+            history.running_mean_grad = g_normalized.copy()
+        else:
+            # EMA update
+            alpha = self.grad_ema_decay
+            history.running_mean_grad = (
+                (1 - alpha) * history.running_mean_grad + alpha * g_normalized
+            )
+        
+        history.update_count += 1
+    
+    def compute_baseline_deviation(
+        self, 
+        client_id: int, 
+        current_gradient: np.ndarray,
+        grad_median: Optional[np.ndarray] = None
+    ) -> float:
+        """
+        Tính độ lệch baseline δi theo công thức PDF.
+        
+        Formula (PDF):
+            δi = 0.5 × |∥gi∥ - n̄i| / σn,i + 0.5 × (1 - Cosine(gi, ḡ_hist_i))
+        
+        Trong đó:
+        - n̄i: Mean của lịch sử norm
+        - σn,i: Std của lịch sử norm
+        - ḡ_hist_i: Running mean gradient (normalized)
+        
+        Args:
+            client_id: Client ID
+            current_gradient: Current gradient vector
+            grad_median: Global median gradient (không dùng trong PDF formula δi)
             
-        # 2. Delta Direction (Dựa trên Median hiện tại, KHÔNG cần lịch sử)
-        # Cosine Distance = 1 - Cosine Similarity
+        Returns:
+            Baseline deviation δi ∈ [0, 2] (có thể > 1 nếu cực lệch)
+        """
+        if client_id not in self.client_histories:
+            return 0.0
+        
+        history = self.client_histories[client_id]
+        
+        # Cần ít nhất 2 samples để tính std
+        if len(history.norms) < 2:
+            return 0.0
         
         g_flat = current_gradient.flatten()
-        m_flat = grad_median.flatten()
+        current_norm = float(np.linalg.norm(g_flat))
         
-        dot = np.dot(g_flat, m_flat)
-        norm_g = np.linalg.norm(g_flat)
-        norm_m = np.linalg.norm(m_flat)
+        # === PHẦN 1: NORM DEVIATION ===
+        # δ_norm = |∥gi∥ - n̄i| / σn,i
+        norms_list = list(history.norms)
+        mean_norm = np.mean(norms_list)
+        std_norm = np.std(norms_list)
         
-        if norm_g < 1e-9 or norm_m < 1e-9:
+        if std_norm < 1e-9:
+            delta_norm = 0.0
+        else:
+            delta_norm = abs(current_norm - mean_norm) / std_norm
+        
+        # Clip để tránh giá trị quá lớn
+        delta_norm = min(delta_norm, 3.0)  # Cap at 3 std
+        delta_norm = delta_norm / 3.0  # Normalize to [0, 1]
+        
+        # === PHẦN 2: DIRECTION DEVIATION ===
+        # δ_dir = 1 - Cosine(gi, ḡ_hist_i)
+        if history.running_mean_grad is None or current_norm < 1e-9:
             delta_dir = 0.0
         else:
-            # Similarity [-1, 1]
-            cosine_sim = dot / (norm_g * norm_m)
-            # Distance [0, 2] (0 là trùng hướng, 2 là ngược hướng)
-            delta_dir = 1.0 - cosine_sim 
+            g_normalized = g_flat / current_norm
+            hist_grad = history.running_mean_grad
+            hist_norm = np.linalg.norm(hist_grad)
             
-        # 3. Kết hợp (Dùng trọng số cấu hình)
-        # Lấy weight từ self (đã init từ config), mặc định 0.5
-        w_norm = getattr(self, 'delta_norm_weight', 0.5)
-        w_dir = getattr(self, 'delta_direction_weight', 0.5)
+            if hist_norm < 1e-9:
+                delta_dir = 0.0
+            else:
+                hist_normalized = hist_grad / hist_norm
+                cosine_sim = np.dot(g_normalized, hist_normalized)
+                cosine_sim = np.clip(cosine_sim, -1.0, 1.0)
+                # Cosine ∈ [-1, 1] → δ_dir ∈ [0, 2], normalize to [0, 1]
+                delta_dir = (1.0 - cosine_sim) / 2.0
         
-        delta_combined = w_norm * delta_norm + w_dir * delta_dir
+        # === COMBINE ===
+        delta_i = (self.delta_norm_weight * delta_norm + 
+                   self.delta_direction_weight * delta_dir)
+        
+        return delta_i
+    
+    def compute_baseline_deviation_detailed(
+        self,
+        client_id: int,
+        current_gradient: np.ndarray,
+        grad_median: np.ndarray
+    ) -> Dict[str, float]:
+        """
+        Tính chi tiết baseline deviation với breakdown.
+        
+        Returns:
+            Dict với delta_norm, delta_direction, delta_combined
+        """
+        if client_id not in self.client_histories:
+            return {
+                'delta_norm': 0.0,
+                'delta_direction': 0.0,
+                'delta_combined': 0.0
+            }
+        
+        history = self.client_histories[client_id]
+        
+        if len(history.norms) < 2:
+            return {
+                'delta_norm': 0.0,
+                'delta_direction': 0.0,
+                'delta_combined': 0.0
+            }
+        
+        g_flat = current_gradient.flatten()
+        current_norm = float(np.linalg.norm(g_flat))
+        
+        # PHẦN 1: NORM DEVIATION (theo PDF: dùng lịch sử cá nhân)
+        norms_list = list(history.norms)
+        mean_norm = np.mean(norms_list)
+        std_norm = np.std(norms_list)
+        
+        if std_norm < 1e-9:
+            delta_norm = 0.0
+        else:
+            delta_norm = abs(current_norm - mean_norm) / std_norm
+            delta_norm = min(delta_norm, 3.0) / 3.0  # Normalize to [0, 1]
+        
+        # PHẦN 2: DIRECTION DEVIATION (so với running mean cá nhân)
+        if history.running_mean_grad is None or current_norm < 1e-9:
+            delta_dir = 0.0
+        else:
+            g_normalized = g_flat / current_norm
+            hist_grad = history.running_mean_grad
+            hist_norm = np.linalg.norm(hist_grad)
+            
+            if hist_norm < 1e-9:
+                delta_dir = 0.0
+            else:
+                hist_normalized = hist_grad / hist_norm
+                cosine_sim = np.dot(g_normalized, hist_normalized)
+                cosine_sim = np.clip(cosine_sim, -1.0, 1.0)
+                delta_dir = (1.0 - cosine_sim) / 2.0
+        
+        # COMBINE
+        delta_combined = (self.delta_norm_weight * delta_norm +
+                         self.delta_direction_weight * delta_dir)
         
         return {
             'delta_norm': delta_norm,
@@ -296,16 +503,218 @@ class NonIIDHandler:
             'delta_combined': delta_combined
         }
 
+    # =========================================================================
+    # UTILITIES
+    # =========================================================================
+    
+    def get_last_h_score(self) -> float:
+        """Get last computed H score."""
+        return self.last_h_score
+    
+    def get_client_history_length(self, client_id: int) -> int:
+        """Get number of rounds tracked for a client."""
+        if client_id not in self.client_histories:
+            return 0
+        return len(self.client_histories[client_id].norms)
+    
     def get_stats(self) -> Dict:
         """Get handler statistics."""
         return {
             'weight_cv': self.weight_cv,
             'weight_sim': self.weight_sim,
             'weight_cluster': self.weight_cluster,
-            'h_threshold_normal': self.h_threshold_normal,
-            'h_threshold_alert': self.h_threshold_alert,
-            'adaptive_multiplier': self.adaptive_multiplier,
-            'baseline_percentile': self.baseline_percentile,
+            'adjustment_factor': self.adjustment_factor,
+            'theta_adj_clip_min': self.theta_adj_clip_min,
+            'theta_adj_clip_max': self.theta_adj_clip_max,
             'baseline_window_size': self.baseline_window_size,
-            'num_tracked_clients': len(self.client_gradients)
+            'delta_norm_weight': self.delta_norm_weight,
+            'delta_direction_weight': self.delta_direction_weight,
+            'num_tracked_clients': len(self.client_histories),
+            'last_h_score': self.last_h_score
         }
+    
+    def reset_client_history(self, client_id: int):
+        """Reset history for a specific client."""
+        if client_id in self.client_histories:
+            del self.client_histories[client_id]
+    
+    def reset_all_histories(self):
+        """Reset all client histories."""
+        self.client_histories.clear()
+
+
+# =============================================================================
+# TESTING
+# =============================================================================
+
+def test_noniid_handler():
+    """Test NonIIDHandler theo PDF spec."""
+    print("\n" + "="*70)
+    print("🧪 TESTING NONIID HANDLER (PDF SPEC)")
+    print("="*70)
+    
+    np.random.seed(42)
+    
+    # Initialize handler
+    handler = NonIIDHandler(
+        weight_cv=0.4,
+        weight_sim=0.4,
+        weight_cluster=0.2,
+        adjustment_factor=0.4,
+        theta_adj_clip_min=0.5,
+        theta_adj_clip_max=0.9
+    )
+    
+    # =========================================================================
+    # TEST 1: θ_adj Formula
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 1: θ_adj Formula (PDF: θbase + (H-0.5)×0.4)")
+    print("-"*70)
+    
+    test_cases = [
+        # (H, θbase, expected_θadj)
+        (0.5, 0.85, 0.85),      # H=0.5 → no adjustment
+        (0.5, 0.65, 0.65),
+        (0.7, 0.85, 0.85 + 0.2*0.4),  # H>0.5 → increase
+        (0.3, 0.85, 0.85 - 0.2*0.4),  # H<0.5 → decrease
+        (1.0, 0.85, 0.9),       # H=1.0 → max clip
+        (0.0, 0.85, 0.65),      # H=0.0 → θbase - 0.2
+        (0.0, 0.5, 0.5),        # Min clip
+    ]
+    
+    all_pass = True
+    for H, theta_base, expected in test_cases:
+        result = handler.compute_adaptive_threshold(H, theta_base)
+        expected_clipped = np.clip(expected, 0.5, 0.9)
+        passed = abs(result - expected_clipped) < 1e-6
+        status = "✅" if passed else "❌"
+        print(f"   {status} H={H:.1f}, θbase={theta_base:.2f} → θadj={result:.3f} (expected: {expected_clipped:.3f})")
+        if not passed:
+            all_pass = False
+    
+    # =========================================================================
+    # TEST 2: H Score
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 2: H Score Computation")
+    print("-"*70)
+    
+    # IID data: similar gradients
+    iid_grads = [np.random.randn(1000) * 0.1 + np.ones(1000) for _ in range(20)]
+    H_iid = handler.compute_heterogeneity_score(iid_grads, list(range(20)))
+    print(f"   IID gradients (similar):     H = {H_iid:.3f} (expected: low, < 0.3)")
+    
+    # Non-IID data: diverse gradients
+    noniid_grads = [np.random.randn(1000) * i * 0.5 for i in range(1, 21)]
+    H_noniid = handler.compute_heterogeneity_score(noniid_grads, list(range(20)))
+    print(f"   Non-IID gradients (diverse): H = {H_noniid:.3f} (expected: high, > 0.4)")
+    
+    if H_iid < H_noniid:
+        print(f"   ✅ H_iid < H_noniid: Correct ordering")
+    else:
+        print(f"   ❌ H_iid >= H_noniid: Wrong ordering")
+        all_pass = False
+    
+    # =========================================================================
+    # TEST 3: Baseline Deviation δi
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 3: Baseline Deviation δi")
+    print("-"*70)
+    
+    handler2 = NonIIDHandler()
+    
+    # Simulate consistent client
+    base_grad = np.random.randn(1000)
+    for i in range(10):
+        noisy_grad = base_grad + np.random.randn(1000) * 0.01
+        handler2.update_client_gradient(client_id=1, gradient=noisy_grad)
+    
+    # Test δi for similar gradient
+    similar_grad = base_grad + np.random.randn(1000) * 0.01
+    delta_similar = handler2.compute_baseline_deviation(1, similar_grad)
+    print(f"   Similar gradient: δi = {delta_similar:.3f} (expected: low, < 0.2)")
+    
+    # Test δi for different gradient
+    different_grad = -base_grad * 2  # Opposite direction, different magnitude
+    delta_different = handler2.compute_baseline_deviation(1, different_grad)
+    print(f"   Different gradient: δi = {delta_different:.3f} (expected: high, > 0.5)")
+    
+    if delta_similar < delta_different:
+        print(f"   ✅ δ_similar < δ_different: Correct ordering")
+    else:
+        print(f"   ❌ δ_similar >= δ_different: Wrong ordering")
+        all_pass = False
+    
+    # =========================================================================
+    # TEST 4: Detailed Deviation
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 4: Detailed Baseline Deviation")
+    print("-"*70)
+    
+    grad_median = np.median(np.vstack([base_grad, similar_grad]), axis=0)
+    detail = handler2.compute_baseline_deviation_detailed(1, different_grad, grad_median)
+    print(f"   δ_norm:      {detail['delta_norm']:.3f}")
+    print(f"   δ_direction: {detail['delta_direction']:.3f}")
+    print(f"   δ_combined:  {detail['delta_combined']:.3f}")
+    
+    if detail['delta_combined'] == (0.5 * detail['delta_norm'] + 0.5 * detail['delta_direction']):
+        print(f"   ✅ Combined formula correct")
+    else:
+        print(f"   ❌ Combined formula wrong")
+        all_pass = False
+    
+    # =========================================================================
+    # TEST 5: Edge Cases
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 5: Edge Cases")
+    print("-"*70)
+    
+    handler3 = NonIIDHandler()
+    
+    # New client (no history)
+    delta_new = handler3.compute_baseline_deviation(999, np.random.randn(1000))
+    print(f"   New client (no history): δi = {delta_new:.3f} (expected: 0.0)")
+    if delta_new == 0.0:
+        print(f"   ✅ Correct")
+    else:
+        print(f"   ❌ Wrong")
+        all_pass = False
+    
+    # Client with 1 sample (not enough for std)
+    handler3.update_client_gradient(998, np.random.randn(1000))
+    delta_one = handler3.compute_baseline_deviation(998, np.random.randn(1000))
+    print(f"   Client with 1 sample: δi = {delta_one:.3f} (expected: 0.0)")
+    if delta_one == 0.0:
+        print(f"   ✅ Correct")
+    else:
+        print(f"   ❌ Wrong")
+        all_pass = False
+    
+    # Very few gradients for H
+    H_few = handler3.compute_heterogeneity_score([np.ones(100)], [0])
+    print(f"   H with 1 gradient: H = {H_few:.3f} (expected: 0.0)")
+    if H_few == 0.0:
+        print(f"   ✅ Correct")
+    else:
+        print(f"   ❌ Wrong")
+        all_pass = False
+    
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    print("\n" + "="*70)
+    if all_pass:
+        print("✅ ALL TESTS PASSED!")
+    else:
+        print("❌ SOME TESTS FAILED")
+    print("="*70 + "\n")
+    
+    return all_pass
+
+
+if __name__ == "__main__":
+    test_noniid_handler()
