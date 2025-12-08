@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cifar-cnn"
-version = "1.0.1"
-description = "Federated Learning với Hybrid Adaptive Defense System"
+version = "2.0.0"
+description = "Federated Learning với Hybrid Adaptive Defense System (V2 - main.pdf)"
 license = "Apache-2.0"
 dependencies = [
     "flwr[simulation]>=1.22.0",
@@ -29,7 +29,6 @@ clientapp = "cifar_cnn.client_app:app"
 # =====================================================================
 [tool.flwr.app.config]
 
-# ----- Basic FL Settings -----
 num-clients = 40
 num-server-rounds = 50
 fraction-fit = 0.6
@@ -38,224 +37,162 @@ min-fit-clients = 23
 min-evaluate-clients = 6
 min-available-clients = 40
 
-# ----- Training Settings -----
 local-epochs = 5
 batch-size = 512
 learning-rate = 0.001
-
-# ----- FedProx Parameter -----
 proximal-mu = 0.01
 
-# ----- Data Partition -----
 partition-type = "iid"
 alpha = 0.5
 
-# ----- GPU Optimization -----
 use-mixed-precision = true
 num-workers = 0
 pin-memory = true
 
-# ----- Attack Configuration -----
 attack-type = "none"
 attack-ratio = 0.0
-
-# Label Flipping
 flip-probability = 1.0
 flip-type = "reverse"
-
-# Byzantine
 byzantine-type = "sign_flip"
 byzantine-scale = 2.0
-
-# Gaussian Noise
 noise-std = 0.1
 
-# ----- Model Saving -----
 auto-save = true
 save-dir = "saved_models"
 save-interval = 10
 resume-from = ""
 
-# ----- Defense System -----
 enable-defense = true
 
-# Warmup Phase
+# =====================================================================
+# WARMUP PHASE (Vòng 1-10)
+# =====================================================================
+# QUAN TRỌNG: Trong warmup, TẤT CẢ defense modules bị BYPASS
+# - Layer 1, Layer 2: Disabled
+# - Hard/Soft Filter: Disabled  
+# - Chỉ dùng trusted clients (Strust), R=1.0, mode=NORMAL
+# - Mục đích: Hội tụ mô hình trên dữ liệu sạch
+# Sau warmup (vòng 11+): Defense kích hoạt, clients mới có Rinit=0.25
+# =====================================================================
 warmup-rounds = 10
 
 # =====================================================================
-# DEFENSE PARAMETERS - LAYER 1: DBSCAN DETECTION
+# LAYER 1: ENHANCED DBSCAN (V2 - 3 trạng thái)
 # =====================================================================
-# Phát hiện nhanh các mối đe dọa rõ ràng bằng:
-# - Magnitude Filter (MAD-based): Đánh dấu nếu ||gi|| > Median + k×MAD
-# - DBSCAN Clustering: Tìm outliers trong không gian 20D
-# - Voting: Kết hợp cả 2 phương pháp
+# CHỈ CHẠY SAU WARMUP (vòng 11+)
+# REJECTED: ||gi|| > Median + 15×MAD
+# FLAGGED: ||gi|| > Median + 4×MAD  
+# ACCEPTED: còn lại
+# PCA: dpca = min(20, floor(0.5×n))
 # =====================================================================
 [tool.flwr.app.config.defense.layer1]
 
-# PCA Configuration (từ PDF trang 10: "chiếu gradient từ Rd xuống R20")
 pca-dims = 20
-
-# DBSCAN Configuration (từ PDF: "ε = 0.5×median_dist, minPts = 3")
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 0.5
-
-# Magnitude Filter (từ PDF: "k = 4")
-mad-k-normal = 4.0
-mad-k-warmup = 6.0
-
-# Voting Mechanism (từ PDF: "cả hai phương pháp đồng ý")
-voting-threshold-normal = 2
-voting-threshold-warmup = 3
+mad-k-reject = 15.0
+mad-k-flag = 4.0
+voting-threshold = 2
 
 # =====================================================================
-# DEFENSE PARAMETERS - LAYER 2: DISTANCE + DIRECTION DETECTION
+# LAYER 2: DISTANCE + DIRECTION (V2 - Ma trận cứu vãn)
 # =====================================================================
-# Phân tích sâu các gradient chưa bị Layer 1 phát hiện:
-# - Distance: ||gi - gmedian|| > 1.5×median
-# - Direction: cosine similarity < 0.3
-# =====================================================================
+# CHỈ CHẠY SAU WARMUP
 [tool.flwr.app.config.defense.layer2]
 
-# Distance Check (từ PDF: "1.5×median")
 distance-multiplier = 1.5
-
-# Direction Check (từ PDF: "< 0.3")
 cosine-threshold = 0.3
 
 # =====================================================================
-# DEFENSE PARAMETERS - NON-IID HANDLER
+# NON-IID HANDLER (V2)
 # =====================================================================
-# Xử lý dữ liệu không đồng nhất để giảm false positives:
-# - Heterogeneity Score: H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
-# - Adaptive Thresholds: θ_adj = clip(θ_base + (H-0.5)×0.4)
-# - Baseline Tracking: δi = 0.5×δ_norm(i) + 0.5×δ_dir(i)
+# H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+# θ_adj = clip(θbase + (H-0.5)×0.4, 0.5, 0.9)
 # =====================================================================
 [tool.flwr.app.config.defense.noniid]
 
-# =====================================================================
-# H SCORE WEIGHTS (NEW - Phase 1 Optimization)
-# =====================================================================
-# Formula: H = weight-cv × H_CV + weight-sim × H_sim + weight-cluster × H_cluster
-# Constraint: weight-cv + weight-sim + weight-cluster = 1.0
-# =====================================================================
-
-weight-cv = 0.5
-weight-sim = 0.3
+weight-cv = 0.4
+weight-sim = 0.4
 weight-cluster = 0.2
-
-# =====================================================================
-# H THRESHOLDS & ADAPTIVE ADJUSTMENT
-# =====================================================================
-
-# Heterogeneity Thresholds (implementation choice)
-h-threshold-normal = 0.6
-h-threshold-alert = 0.5
-
-# Adaptive Multiplier (cho công thức θ_adj khi H cao)
-adaptive-multiplier = 1.5
-
-# Adjustment Factor (từ PDF trang 10)
 adjustment-factor = 0.4
-
-# =====================================================================
-# BASELINE TRACKING
-# =====================================================================
-
-baseline-percentile = 60
+threshold-min = 0.5
+threshold-max = 0.9
 baseline-window-size = 10
-
-# =====================================================================
-# DELTA WEIGHTS (Baseline Deviation)
-# =====================================================================
-# Formula: δi = delta-norm-weight × δ_norm + delta-direction-weight × δ_dir
-# Constraint: delta-norm-weight + delta-direction-weight = 1.0
-# =====================================================================
-
 delta-norm-weight = 0.5
 delta-direction-weight = 0.5
 
 # =====================================================================
-# DEFENSE PARAMETERS - TWO-STAGE FILTERING
+# TWO-STAGE FILTERING (V2)
 # =====================================================================
-# Lọc hai giai đoạn:
-# - Hard Filter: Loại bỏ ngay các máy khách có ci > θ_adj_h
-# - Soft Filter: Lọc thêm dựa trên reputation thấp
+# CHỈ CHẠY SAU WARMUP
+# Hard: ci > θ_adj(base=0.85)
+# Soft: ci > θ_adj(base=0.65) AND R < τ_mode
+#
+# τ_mode (soft-rep-threshold) LOGIC:
+# - NORMAL (an toàn, dễ tính): τ = 0.2 → chỉ filter R < 0.2
+# - ALERT (cảnh giác): τ = 0.4 → filter R < 0.4
+# - DEFENSE (nguy hiểm, khắt khe): τ = 0.6 → filter R < 0.6
 # =====================================================================
 [tool.flwr.app.config.defense.filtering]
 
-# Hard Filtering (k-threshold cho confidence scoring)
-hard-k-threshold = 3
-
-# FIX #3: Hard Threshold Range (từ PDF trang 10)
-# PDF: "θ_adj_h ∈ [0.85, 0.95] (điều chỉnh theo H)"
-hard-threshold-min = 0.85
-hard-threshold-max = 0.95
-
-# Soft Filtering (reputation-based)
-soft-reputation-threshold = 0.4
-soft-distance-multiplier = 2.0
-soft-enabled = true
+hard-threshold-base = 0.85
+soft-threshold-base = 0.65
+soft-rep-threshold-normal = 0.2
+soft-rep-threshold-alert = 0.4
+soft-rep-threshold-defense = 0.6
 
 # =====================================================================
-# DEFENSE PARAMETERS - REPUTATION SYSTEM
+# REPUTATION SYSTEM (V2)
 # =====================================================================
-# Hệ thống danh tiếng với:
-# - Asymmetric EMA: α_down < α_up (trừng phạt nhanh, thưởng chậm)
-# - Floor Lifting: Nâng reputation từ 0.15 → 0.3 sau 5 rounds tốt
+# α_down=0.5, α_up=0.15, Rinit=0.25
+# λ: clean=1.0, suspicious=[0.6,0.8], rejected=[0.1,0.5]
 # =====================================================================
 [tool.flwr.app.config.defense.reputation]
 
-# EMA (Exponential Moving Average)
-# PDF nói "α↓ < α↑" nhưng không cho giá trị cụ thể
 ema-alpha-increase = 0.15
-ema-alpha-decrease = 0.2
-
-# Penalties
-penalty-flagged = 0.2
-#penalty-variance = 0.1
-
-# Rewards
-reward-clean = 0.1
-
-# Floor Lifting Mechanism (Probation-based)
-# Nếu Reputation < warning-threshold, vào chế độ Probation.
-# Nếu tốt trong 'probation-rounds' liên tiếp -> tiếp tục tính theo EMA
+ema-alpha-decrease = 0.5
+initial-reputation = 0.25
+lambda-clean = 1.0
+lambda-suspicious-base = 0.6
+lambda-suspicious-h-mult = 0.2
+lambda-rejected-base = 0.1
+lambda-rejected-h-mult = 0.4
 floor-warning-threshold = 0.2
 floor-probation-rounds = 5
 
-# Initial Reputation
-initial-reputation = 0.5
-
 # =====================================================================
-# DEFENSE PARAMETERS - MODE CONTROLLER
+# MODE CONTROLLER (V2)
 # =====================================================================
-# Chuyển đổi chế độ thích ứng:
-# - NORMAL (ρ ≤ 0.15): Weighted Average
-# - ALERT (0.15 < ρ ≤ 0.30): Trimmed Mean
-# - DEFENSE (ρ > 0.30): Coordinate Median
+# NORMAL(ρ≤0.15), ALERT(0.15<ρ≤0.30), DEFENSE(ρ>0.30)
+# Emergency: trust-breach, rep-drop
+# Hysteresis: 2 rounds
 # =====================================================================
 [tool.flwr.app.config.defense.mode]
 
-# Mode Thresholds
 threshold-normal-to-alert = 0.15
 threshold-alert-to-defense = 0.30
-
-# Hysteresis (tránh dao động giữa các modes)
-#hysteresis-normal = 0.05
-#hysteresis-defense = 0.15
-
-# Reputation Gates (điều kiện để chuyển vào DEFENSE)
-rep-gate-defense = 0.1
-
-# Initial Mode
+trust-breach-count = 3
+trust-breach-threshold = 0.85
+rep-drop-threshold = 0.10
+hysteresis-rounds = 2
 initial-mode = "NORMAL"
-
-# Safe Weighted Average Parameter
-# Thêm hằng số ổn định để tránh lỗi chia cho 0
 safe-weight-epsilon = 1e-6
 
 # =====================================================================
-# FEDERATION CONFIGURATION
+# CONFIDENCE SCORING (V2)
+# =====================================================================
+# ci = clip((0.4×I_Flagged + 0.3×I_Fail_Euclidean + 0.3×δi) × factor, 0, 1)
+# =====================================================================
+[tool.flwr.app.config.defense.confidence]
+
+weight-flagged = 0.4
+weight-euclidean = 0.3
+weight-baseline = 0.3
+baseline-suspicious-threshold = 0.3
+baseline-factor-suspicious = 0.8
+
+# =====================================================================
+# FEDERATION
 # =====================================================================
 [tool.flwr.federations]
 default = "local-simulation"
