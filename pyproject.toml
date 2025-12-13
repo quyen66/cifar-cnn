@@ -112,9 +112,9 @@ cosine-threshold = 0.3
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.4
-weight-sim = 0.4
-weight-cluster = 0.2
+weight-cv = 0.65
+weight-sim = 0.15
+weight-cluster = 0.20
 
 # θ_adj parameters (PDF: θ_base + (H-0.5) × factor)
 adjustment-factor = 0.4
