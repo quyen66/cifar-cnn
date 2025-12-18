@@ -88,7 +88,8 @@ class Layer2Detector:
         client_ids: List[int],
         layer1_results: Dict[int, str],
         current_round: int = 0,
-        is_malicious_ground_truth: Optional[List[bool]] = None
+        is_malicious_ground_truth: Optional[List[bool]] = None,
+        external_reference: Optional[np.ndarray] = None
     ) -> Tuple[Dict[int, str], Dict[int, Optional[str]]]:
         """
         Phân tích Layer 2 dựa trên kết quả Layer 1.
@@ -116,7 +117,7 @@ class Layer2Detector:
         # =========================================================
         # STEP 1: Tính toán metrics (cho tất cả clients)
         # =========================================================
-        distances, cosines, median_grad = self._compute_metrics(gradients)
+        distances, cosines, median_grad = self._compute_metrics(gradients, reference_vector=external_reference)
         
         # Tính ngưỡng distance động
         median_distance = np.median(distances)
@@ -176,7 +177,8 @@ class Layer2Detector:
 
     def _compute_metrics(
         self, 
-        gradients: List[np.ndarray]
+        gradients: List[np.ndarray],
+        reference_vector: Optional[np.ndarray] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Tính Euclidean distance và Cosine similarity với median gradient.
@@ -189,8 +191,12 @@ class Layer2Detector:
         # Stack gradients
         grad_matrix = np.vstack([g.flatten() for g in gradients])
         
-        # Tính median gradient (theo từng chiều)
-        median_grad = np.median(grad_matrix, axis=0)
+        if reference_vector is not None:
+            # Nếu có Reference từ Server (Lịch sử), dùng nó!
+            median_grad = reference_vector
+        else:
+            # Nếu không (Vòng 1), tự tính Median của vòng này
+            median_grad = np.median(grad_matrix, axis=0)
         
         # Euclidean distances
         distances = np.array([

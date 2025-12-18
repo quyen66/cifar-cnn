@@ -1,4 +1,4 @@
-"""Flower client implementation - WITH FEDPROX SUPPORT."""
+"""Flower client implementation - Updated for 7 Attacks."""
 
 import os
 import torch
@@ -6,10 +6,14 @@ from flwr.client import Client, ClientApp, NumPyClient
 from flwr.common import Context
 from cifar_cnn.task import get_model, train, test, get_parameters, set_parameters
 from cifar_cnn.dataset import prepare_datasets
+
+# Import các loại attack clients
 from cifar_cnn.attacks import (
     LabelFlippingClient,
     ByzantineClient, 
     GaussianNoiseClient,
+    RandomNoiseClient,
+    BackdoorClient,
     ALIEClient,
     MinMaxClient
 )
@@ -17,18 +21,8 @@ from cifar_cnn.attacks import (
 os.environ['PYTHONWARNINGS'] = 'ignore::DeprecationWarning'
 
 # ============================================
-# FORCE GPU USAGE
+# FLOWER CLIENT (BENIGN) DEFINITION
 # ============================================
-FORCE_GPU = True
-if FORCE_GPU and torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True  # Faster training
-    torch.backends.cudnn.enabled = True
-    print(f"🚀 GPU ENABLED: {torch.cuda.get_device_name(0)}")
-    print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-else:
-    print("⚠️  Running on CPU (slower)")
-
-
 class FlowerClient(NumPyClient):
     """Normal benign client with FedProx support."""
     
@@ -43,7 +37,7 @@ class FlowerClient(NumPyClient):
         self.use_mixed_precision = use_mixed_precision
         self.proximal_mu = proximal_mu
         
-        # FORCE move model to GPU
+        # Move model to GPU if available
         self.net = self.net.to(self.device)
     
     def fit(self, parameters, config):
@@ -53,7 +47,6 @@ class FlowerClient(NumPyClient):
         
         # Store global parameters for FedProx (convert to tensors)
         global_params = [p.clone().detach() for p in self.net.parameters()]
-
         
         # Train with FedProx
         results = train(
@@ -78,107 +71,119 @@ class FlowerClient(NumPyClient):
         return loss, len(self.testloader.dataset), {"accuracy": accuracy}
 
 
+# ============================================
+# CLIENT FACTORY FUNCTION
+# ============================================
 def client_fn(context: Context) -> Client:
-    """Create client with FedProx support."""
+    """Create client based on config."""
     
-    # ============================================
-    # FORCE GPU DEVICE
-    # ============================================
-    if FORCE_GPU and torch.cuda.is_available():
+    # 1. Device Setup
+    if torch.cuda.is_available():
         device = torch.device("cuda")
-        print(f"✓ Client using GPU")
     else:
         device = torch.device("cpu")
-        print(f"⚠️  Client using CPU")
     
-    # Client ID
+    # 2. Get Config
     client_id = int(context.node_config["partition-id"])
+    run_config = context.run_config
     
-    # Config
-    num_clients = context.run_config["num-clients"]
-    batch_size = context.run_config["batch-size"]
-    local_epochs = context.run_config["local-epochs"]
-    learning_rate = context.run_config["learning-rate"]
-    use_mixed_precision = context.run_config.get("use-mixed-precision", True)
-    partition_type = context.run_config.get("partition-type", "iid")
-    alpha = context.run_config.get("alpha", 0.5)
+    num_clients = run_config["num-clients"]
+    batch_size = run_config["batch-size"]
+    local_epochs = run_config["local-epochs"]
+    learning_rate = run_config["learning-rate"]
+    use_mixed_precision = run_config.get("use-mixed-precision", True)
+    proximal_mu = run_config.get("proximal-mu", 0.01)
     
-    # FedProx parameter
-    proximal_mu = context.run_config.get("proximal-mu", 0.005)
+    # Attack Config
+    attack_type = run_config.get("attack-type", "none")
+    attack_ratio = run_config.get("attack-ratio", 0.0)
     
-    # GPU optimization
-    num_workers = context.run_config.get("num-workers", 0)  # 0 for GPU (faster)
-    pin_memory = context.run_config.get("pin-memory", True) if device.type == "cuda" else False
-    
-    # Attack config
-    attack_type = context.run_config.get("attack-type", "none")
-    attack_ratio = context.run_config.get("attack-ratio", 0.0)
-    
-    # Load data with GPU optimization
+    # 3. Prepare Data
+    # Lưu ý: num_workers=0 để tránh lỗi đa luồng trong simulation nếu máy yếu
     trainloader, testloader = prepare_datasets(
-        client_id, num_clients, batch_size, partition_type, alpha=alpha,
-        num_workers=num_workers, pin_memory=pin_memory
+        client_id, num_clients, batch_size, 
+        run_config.get("partition-type", "iid"), 
+        alpha=run_config.get("alpha", 0.5),
+        num_workers=0, pin_memory=True
     )
     
-    # Model - FORCE to GPU immediately
+    # 4. Initialize Model
     net = get_model().to(device)
     
-    # Determine if attacker
+    # 5. Determine Role (Attacker vs Benign)
     num_attackers = int(num_clients * attack_ratio)
     is_attacker = client_id < num_attackers
     
-    # Create appropriate client
+    # Nếu là client lành tính hoặc không có tấn công
     if not is_attacker or attack_type == "none":
         return FlowerClient(
             net, trainloader, testloader, device, local_epochs,
             learning_rate, use_mixed_precision, proximal_mu
         ).to_client()
     
-    # Attack clients (all GPU-enabled + FedProx)
-    if attack_type == "label_flip":
-        flip_probability = context.run_config.get("flip-probability", 1.0)
-        flip_type = context.run_config.get("flip-type", "reverse")
-        
-        return LabelFlippingClient(
+    # 6. Instantiate Attack Clients
+    if attack_type == "random_noise":
+        scale = run_config.get("random-noise-scale", 0.5)
+        return RandomNoiseClient(
             net, trainloader, testloader, device, local_epochs,
             learning_rate, use_mixed_precision, proximal_mu,
-            flip_probability, flip_type
+            scale=scale
         ).to_client()
-    
-    elif attack_type == "byzantine":
-        byzantine_type = context.run_config.get("byzantine-type", "sign_flip")
-        byzantine_scale = context.run_config.get("byzantine-scale", 10.0)
         
-        return ByzantineClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
-            byzantine_type, byzantine_scale
-        ).to_client()
-    
-    elif attack_type == "gaussian":
-        noise_std = context.run_config.get("noise-std", 0.1)
-        
+    elif attack_type == "gaussian_noise":
+        std = run_config.get("gaussian-noise-std", 0.2)
         return GaussianNoiseClient(
             net, trainloader, testloader, device, local_epochs,
             learning_rate, use_mixed_precision, proximal_mu,
-            noise_std
+            std=std
         ).to_client()
-    
-    elif attack_type == "alie":
-        z_perturbation = context.run_config.get("z-perturbation", 1.5)
-        
-        return ALIEClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
-            z_perturbation
-        ).to_client()
-    
-    else:
-        return FlowerClient(
+
+    elif attack_type == "sign_flip":
+        return ByzantineClient(
             net, trainloader, testloader, device, local_epochs,
             learning_rate, use_mixed_precision, proximal_mu
         ).to_client()
 
+    elif attack_type == "label_flip":
+        flip_prob = run_config.get("flip-probability", 1.0)
+        flip_type = run_config.get("flip-type", "reverse")
+        return LabelFlippingClient(
+            net, trainloader, testloader, device, local_epochs,
+            learning_rate, use_mixed_precision, proximal_mu,
+            flip_probability=flip_prob, flip_type=flip_type
+        ).to_client()
+        
+    elif attack_type == "backdoor":
+        target_label = run_config.get("backdoor-label", 0)
+        pixel_count = run_config.get("backdoor-pixel-count", 4)
+        return BackdoorClient(
+            net, trainloader, testloader, device, local_epochs,
+            learning_rate, use_mixed_precision, proximal_mu,
+            target_label=target_label, pixel_count=pixel_count
+        ).to_client()
+        
+    elif attack_type == "alie":
+        z = run_config.get("alie-z", 1.5)
+        return ALIEClient(
+            net, trainloader, testloader, device, local_epochs,
+            learning_rate, use_mixed_precision, proximal_mu,
+            z=z
+        ).to_client()
+        
+    elif attack_type == "minmax":
+        gamma = run_config.get("minmax-gamma", 10.0)
+        return MinMaxClient(
+            net, trainloader, testloader, device, local_epochs,
+            learning_rate, use_mixed_precision, proximal_mu,
+            gamma=gamma
+        ).to_client()
+        
+    else:
+        # Fallback to benign
+        return FlowerClient(
+            net, trainloader, testloader, device, local_epochs,
+            learning_rate, use_mixed_precision, proximal_mu
+        ).to_client()
 
 # Flower ClientApp
 app = ClientApp(client_fn=client_fn)

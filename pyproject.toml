@@ -30,7 +30,7 @@ clientapp = "cifar_cnn.client_app:app"
 [tool.flwr.app.config]
 
 num-clients = 40
-num-server-rounds = 50
+num-server-rounds = 30
 fraction-fit = 0.6
 fraction-evaluate = 0.2
 min-fit-clients = 23
@@ -38,31 +38,49 @@ min-evaluate-clients = 6
 min-available-clients = 40
 
 local-epochs = 5
-batch-size = 512
+batch-size = 1024
 learning-rate = 0.001
 proximal-mu = 0.01
 
-partition-type = "iid"
+partition-type = "non-iid"
 alpha = 0.5
 
 use-mixed-precision = true
 num-workers = 0
 pin-memory = true
 
-attack-type = "none"
-attack-ratio = 0.0
-flip-probability = 1.0
-flip-type = "reverse"
-byzantine-type = "sign_flip"
-byzantine-scale = 2.0
-noise-std = 0.1
-
 auto-save = true
-save-dir = "saved_models"
+save-dir = "saved_models/Cfg1_cluster_emphasis/none"
 save-interval = 10
 resume-from = ""
 
 enable-defense = true
+
+# --- ATTACK CONFIGURATION ---
+# Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax"
+attack-type = "none" 
+attack-ratio = 0.0          # 30% clients là attackers
+
+# 1. Random Noise (Uniform)
+random-noise-scale = 0.5    # Biên độ nhiễu Uniform [-scale, scale]
+
+# 2. Gaussian Noise
+gaussian-noise-std = 0.2    # Độ lệch chuẩn của nhiễu Gaussian
+
+# 4. Label Flipping
+flip-probability = 1.0
+flip-type = "reverse"       # "reverse" (0->9) hoặc "random"
+
+# 5. Backdoor
+backdoor-label = 0          # Nhãn mục tiêu
+backdoor-pixel-count = 4    # Số lượng pixel trigger
+backdoor-pattern-size = 3   # Kích thước vùng trigger
+
+# 6. ALIE (A Little Is Enough)
+alie-z = 1.5                # Hệ số z (thường 1.0 - 2.0)
+
+# 7. Min-Max
+minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
 
 # =====================================================================
 # WARMUP PHASE (Vòng 1-10)
@@ -100,8 +118,8 @@ voting-threshold = 2
 # CHỈ CHẠY SAU WARMUP
 [tool.flwr.app.config.defense.layer2]
 
-distance-multiplier = 1.5
-cosine-threshold = 0.3
+distance-multiplier = 2.0
+cosine-threshold = 0.15
 
 # =====================================================================
 # NON-IID HANDLER (V2)
@@ -112,9 +130,9 @@ cosine-threshold = 0.3
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.65
-weight-sim = 0.15
-weight-cluster = 0.20
+weight-cv = 0.4
+weight-sim = 0.4
+weight-cluster = 0.2
 
 # θ_adj parameters (PDF: θ_base + (H-0.5) × factor)
 adjustment-factor = 0.4
@@ -147,8 +165,8 @@ grad-ema-decay = 0.3
 [tool.flwr.app.config.defense.filtering]
 
 # Ngưỡng cơ sở (θ_base)
-hard-threshold-base = 0.85
-soft-threshold-base = 0.65
+hard-threshold-base = 0.75
+soft-threshold-base = 0.5
 
 # τ_mode - ngưỡng reputation theo mode
 soft-rep-threshold-normal = 0.2
@@ -189,7 +207,7 @@ lambda-suspicious-base = 0.6
 lambda-suspicious-h-mult = 0.2
 # λ cho rejected clients (bị detection loại bỏ)
 # λ = base + h_mult × H → [0.1, 0.5] khi H ∈ [0, 1]
-lambda-rejected-base = 0.1
+lambda-rejected-base = 0.05
 lambda-rejected-h-mult = 0.4
 
 # --- Probation Parameters (Floor Lifting) ---
@@ -300,9 +318,9 @@ uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
 # =====================================================================
 [tool.flwr.app.config.defense.confidence]
 
-weight-flagged = 0.4
-weight-euclidean = 0.3
-weight-baseline = 0.3
+weight-flagged = 0.3
+weight-euclidean = 0.2
+weight-baseline = 0.5
 baseline-suspicious-threshold = 0.3
 baseline-factor-suspicious = 0.8
 
