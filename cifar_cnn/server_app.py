@@ -164,7 +164,7 @@ class FullPipelineStrategy(FedProx):
             print(f"\n⚡ [WARM-UP CONFIG] Round {server_round}: Forcing Trusted Clients.")
             
             all_clients_dict = client_manager.all()
-            all_real_cids = sorted(list(all_clients_dict.keys()))
+            all_real_cids = sorted(list(all_clients_dict.keys()), key=lambda x: int(x))
             
             print(f"   🔍 [DEBUG] Connected Clients: {len(all_real_cids)}")
             if not all_real_cids:
@@ -205,7 +205,7 @@ class FullPipelineStrategy(FedProx):
         
         # --- BƯỚC 1: XÂY DỰNG MAP ID ---
         if not self.client_id_to_sequential:
-            all_real_ids_strs = sorted([c.cid for c, _ in results])
+            all_real_ids_strs = sorted([c.cid for c, _ in results], key=lambda x: int(x))
             for idx, cid_str in enumerate(all_real_ids_strs):
                 self.client_id_to_sequential[cid_str] = idx
                 self.sequential_to_client_id[idx] = cid_str
