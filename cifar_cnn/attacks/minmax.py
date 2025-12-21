@@ -12,7 +12,7 @@ class MinMaxClient(AttackClient):
     
     def __init__(self, net, trainloader, testloader, device, local_epochs,
                  learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
-                 gamma=10.0):
+                 gamma=10.0, mode="minmax"):
         super().__init__(net, trainloader, testloader, device,
                         local_epochs, learning_rate, use_mixed_precision, proximal_mu)
         self.gamma = gamma
@@ -42,4 +42,5 @@ class MinMaxClient(AttackClient):
             w_mal = w_g + u_mal
             malicious_params.append(w_mal)
             
+        results["is_malicious"] = 1
         return malicious_params, len(self.trainloader.dataset), results

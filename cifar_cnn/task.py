@@ -1,10 +1,9 @@
-"""Model definition and training/testing functions - WITH FEDPROX."""
+"""Model definition and training/testing functions - WITH SMART FEDPROX."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
-
 
 class CNN(nn.Module):
     """CNN model cho CIFAR-10."""
@@ -59,34 +58,45 @@ def get_model():
 def train(net, trainloader, epochs, device, learning_rate=0.001, 
           use_mixed_precision=True, proximal_mu=0.0, global_params=None):
     """
-    Train with optional FedProx proximal term.
-    
-    Args:
-        net: Model to train
-        trainloader: Training data loader
-        epochs: Number of local epochs
-        device: Device to use (cuda/cpu)
-        learning_rate: Learning rate
-        use_mixed_precision: Use mixed precision training
-        proximal_mu: FedProx proximal coefficient (0.01 recommended)
-        global_params: Global model parameters for FedProx
-                       List of tensors in same format as net.parameters()
-    
-    Returns:
-        dict with train_loss
+    Train with SMART FedProx.
+    Auto-detects parameter format (28 trainable vs 46 full state) to calculate loss correctly.
     """
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=learning_rate)
+    
     scaler = torch.amp.GradScaler('cuda') if use_mixed_precision and device.type == 'cuda' else None
     
     net.train()
     net.to(device)
     
-    # Convert global_params to device if provided
+    # --- [SMART FEDPROX PREPARATION] ---
+    fedprox_tensors = []
+    mode = "disabled" # disabled, trainable_only, full_state
+    
     if global_params is not None and proximal_mu > 0:
-        global_params = [p.to(device) if isinstance(p, torch.Tensor) 
-                        else torch.tensor(p, device=device) 
-                        for p in global_params]
+        # Convert global_params to tensors on device
+        with torch.no_grad():
+            for p in global_params:
+                if not isinstance(p, torch.Tensor):
+                    p = torch.tensor(p)
+                fedprox_tensors.append(p.to(device).detach())
+        
+        # Check matching strategy
+        n_global = len(fedprox_tensors)
+        n_trainable = len(list(net.parameters()))       # Should be 28
+        n_state = len(list(net.state_dict().keys()))    # Should be 46
+        
+        if n_global == n_trainable:
+            mode = "trainable_only"
+            # print(f"   🛡️ FedProx Active: Matching {n_global} trainable parameters.")
+        elif n_global == n_state:
+            mode = "full_state"
+            # Map full state by name to find trainable ones
+            global_weight_map = {name: val for name, val in zip(net.state_dict().keys(), fedprox_tensors)}
+            # print(f"   🛡️ FedProx Active: Matching {n_global} state parameters via naming.")
+        else:
+            print(f"   ⚠️ FedProx Warning: Mismatch! Global={n_global}, Trainable={n_trainable}, State={n_state}. Disabled.")
+    # -----------------------------------
     
     total_loss = 0.0
     
@@ -97,40 +107,57 @@ def train(net, trainloader, epochs, device, learning_rate=0.001,
             optimizer.zero_grad(set_to_none=True)
             
             if scaler is not None:
-                # Mixed precision training
                 with torch.amp.autocast('cuda'):
                     outputs = net(images)
                     ce_loss = criterion(outputs, labels)
                     
-                    # FedProx proximal term
-                    if global_params is not None and proximal_mu > 0:
-                        proximal_loss = 0.0
-                        for local_param, global_param in zip(net.parameters(), global_params):
-                            proximal_loss += ((local_param - global_param) ** 2).sum()
+                    # --- FedProx Calculation ---
+                    proximal_loss = 0.0
+                    if mode == "trainable_only":
+                        # Case 28 vs 28: Zip trực tiếp 1-1
+                        for local_p, global_p in zip(net.parameters(), fedprox_tensors):
+                            proximal_loss += torch.sum((local_p - global_p) ** 2)
+                            
+                    elif mode == "full_state":
+                        # Case 46 vs 46: Map theo tên
+                        for name, local_p in net.named_parameters():
+                            if name in global_weight_map:
+                                global_p = global_weight_map[name]
+                                proximal_loss += torch.sum((local_p - global_p) ** 2)
+                                
+                    if mode != "disabled":
                         proximal_loss = (proximal_mu / 2) * proximal_loss
+                        total_batch_loss = ce_loss + proximal_loss
                     else:
-                        proximal_loss = 0.0
-                    
-                    total_batch_loss = ce_loss + proximal_loss
+                        total_batch_loss = ce_loss
+                    # ---------------------------
                 
                 scaler.scale(total_batch_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                # Standard training
                 outputs = net(images)
                 ce_loss = criterion(outputs, labels)
                 
-                # FedProx proximal term
-                if global_params is not None and proximal_mu > 0:
-                    proximal_loss = 0.0
-                    for local_param, global_param in zip(net.parameters(), global_params):
-                        proximal_loss += ((local_param - global_param) ** 2).sum()
+                # --- FedProx Calculation (Standard) ---
+                proximal_loss = 0.0
+                if mode == "trainable_only":
+                    for local_p, global_p in zip(net.parameters(), fedprox_tensors):
+                        proximal_loss += torch.sum((local_p - global_p) ** 2)
+                        
+                elif mode == "full_state":
+                    for name, local_p in net.named_parameters():
+                        if name in global_weight_map:
+                            global_p = global_weight_map[name]
+                            proximal_loss += torch.sum((local_p - global_p) ** 2)
+                            
+                if mode != "disabled":
                     proximal_loss = (proximal_mu / 2) * proximal_loss
+                    total_batch_loss = ce_loss + proximal_loss
                 else:
-                    proximal_loss = 0.0
+                    total_batch_loss = ce_loss
+                # --------------------------------------
                 
-                total_batch_loss = ce_loss + proximal_loss
                 total_batch_loss.backward()
                 optimizer.step()
             
@@ -165,12 +192,34 @@ def test(net, testloader, device):
 
 
 def get_parameters(net):
-    """Get model parameters as numpy arrays."""
+    """Get model parameters as numpy arrays (FULL STATE)."""
     return [val.cpu().numpy() for _, val in net.state_dict().items()]
 
 
 def set_parameters(net, parameters):
     """Set model parameters from numpy arrays."""
-    params_dict = zip(net.state_dict().keys(), parameters)
-    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-    net.load_state_dict(state_dict, strict=True)
+    # Logic: Nếu nhận 28 params thì chỉ update Weights. Nếu 46 thì update Full State.
+    keys = list(net.state_dict().keys())
+    
+    if len(parameters) == len(keys):
+        # Full update
+        params_dict = zip(keys, parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        net.load_state_dict(state_dict, strict=True)
+    else:
+        # Partial update (Chỉ Weights) - Fallback
+        # print(f"⚠️ Warning: Set params partial update ({len(parameters)}/{len(keys)})")
+        state_dict = net.state_dict()
+        # Giả định parameters chỉ chứa weights theo thứ tự trainable
+        # Cần cẩn thận, nhưng thường Flower truyền weights theo thứ tự net.parameters()
+        trainable_keys = list(name for name, _ in net.named_parameters())
+        
+        if len(parameters) == len(trainable_keys):
+             for key, param in zip(trainable_keys, parameters):
+                 state_dict[key] = torch.tensor(param)
+             net.load_state_dict(state_dict, strict=False)
+        else:
+             # Cố gắng zip mù quáng nếu không khớp gì cả
+             params_dict = zip(keys, parameters)
+             state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+             net.load_state_dict(state_dict, strict=False)

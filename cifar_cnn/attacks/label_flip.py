@@ -9,7 +9,7 @@ from cifar_cnn.task import get_parameters
 class LabelFlippingDataset(torch.utils.data.Dataset):
     """Dataset wrapper that flips labels."""
     
-    def __init__(self, original_dataset, flip_probability=1.0, flip_type="reverse", num_classes=10):
+    def __init__(self, original_dataset, flip_probability=1.0, flip_type="reverse", num_classes=10, mode="label_flip"):
         self.dataset = original_dataset
         self.flip_probability = flip_probability
         self.flip_type = flip_type
@@ -82,5 +82,5 @@ class LabelFlippingClient(AttackClient):
             proximal_mu=self.proximal_mu,
             global_params=global_params
         )
-        
+        results["is_malicious"] = 1
         return get_parameters(self.net), len(self.trainloader.dataset), results

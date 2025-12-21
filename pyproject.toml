@@ -38,7 +38,7 @@ min-evaluate-clients = 6
 min-available-clients = 40
 
 local-epochs = 5
-batch-size = 1024
+batch-size = 64
 learning-rate = 0.001
 proximal-mu = 0.01
 
@@ -46,11 +46,12 @@ partition-type = "non-iid"
 alpha = 0.5
 
 use-mixed-precision = true
-num-workers = 0
+num-workers = 2
 pin-memory = true
+persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg1_cluster_emphasis/none"
+save-dir = "saved_models/Cfg2_cluster_emphasis/sign_flip"
 save-interval = 10
 resume-from = ""
 
@@ -58,8 +59,8 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax"
-attack-type = "none" 
-attack-ratio = 0.0          # 30% clients là attackers
+attack-type = "sign_flip" 
+attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
 random-noise-scale = 0.5    # Biên độ nhiễu Uniform [-scale, scale]
@@ -107,7 +108,7 @@ warmup-rounds = 10
 
 pca-dims = 20
 dbscan-min-samples = 3
-dbscan-eps-multiplier = 0.5
+dbscan-eps-multiplier = 0.6
 mad-k-reject = 15.0
 mad-k-flag = 4.0
 voting-threshold = 2
@@ -119,7 +120,7 @@ voting-threshold = 2
 [tool.flwr.app.config.defense.layer2]
 
 distance-multiplier = 2.0
-cosine-threshold = 0.15
+cosine-threshold = 0.4
 
 # =====================================================================
 # NON-IID HANDLER (V2)
@@ -130,12 +131,12 @@ cosine-threshold = 0.15
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.4
-weight-sim = 0.4
-weight-cluster = 0.2
+weight-cv = 0.1
+weight-sim = 0.2
+weight-cluster = 0.7
 
 # θ_adj parameters (PDF: θ_base + (H-0.5) × factor)
-adjustment-factor = 0.4
+adjustment-factor = 0.3
 theta-adj-clip-min = 0.5
 theta-adj-clip-max = 0.9
 
@@ -166,7 +167,7 @@ grad-ema-decay = 0.3
 
 # Ngưỡng cơ sở (θ_base)
 hard-threshold-base = 0.75
-soft-threshold-base = 0.5
+soft-threshold-base = 0.45
 
 # τ_mode - ngưỡng reputation theo mode
 soft-rep-threshold-normal = 0.2
@@ -196,7 +197,7 @@ soft-rep-threshold-defense = 0.6
 # α khi reputation TĂNG (slow reward - cho cơ hội chứng minh)
 ema-alpha-increase = 0.15
 # α khi reputation GIẢM (fast penalty - phản ứng nhanh với tấn công)
-ema-alpha-decrease = 0.5
+ema-alpha-decrease = 0.4
 
 # --- Lambda Penalty Parameters ---
 # λ cho clean clients (không bị flag ở bất kỳ layer nào)
@@ -207,7 +208,7 @@ lambda-suspicious-base = 0.6
 lambda-suspicious-h-mult = 0.2
 # λ cho rejected clients (bị detection loại bỏ)
 # λ = base + h_mult × H → [0.1, 0.5] khi H ∈ [0, 1]
-lambda-rejected-base = 0.05
+lambda-rejected-base = 0.1
 lambda-rejected-h-mult = 0.4
 
 # --- Probation Parameters (Floor Lifting) ---
@@ -319,8 +320,8 @@ uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
 [tool.flwr.app.config.defense.confidence]
 
 weight-flagged = 0.3
-weight-euclidean = 0.2
-weight-baseline = 0.5
+weight-euclidean = 0.3
+weight-baseline = 0.3
 baseline-suspicious-threshold = 0.3
 baseline-factor-suspicious = 0.8
 
@@ -333,4 +334,4 @@ default = "local-simulation"
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 40
 options.backend.client-resources.num-cpus = 4
-options.backend.client-resources.num-gpus = 0.05
+options.backend.client-resources.num-gpus = 0.01

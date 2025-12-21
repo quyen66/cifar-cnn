@@ -51,7 +51,7 @@ class BackdoorClient(AttackClient):
     
     def __init__(self, net, trainloader, testloader, device, local_epochs,
                  learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
-                 target_label=0, pixel_count=4): # pixel_count giữ lại để tương thích config, nhưng logic dùng trigger_size
+                 target_label=0, pixel_count=4, mode="backdoor"): # pixel_count giữ lại để tương thích config, nhưng logic dùng trigger_size
         super().__init__(net, trainloader, testloader, device,
                         local_epochs, learning_rate, use_mixed_precision, proximal_mu)
         self.target_label = target_label
@@ -90,5 +90,5 @@ class BackdoorClient(AttackClient):
             proximal_mu=self.proximal_mu,
             global_params=global_params
         )
-        
+        results["is_malicious"] = 1
         return get_parameters(self.net), len(self.trainloader.dataset), results

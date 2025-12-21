@@ -8,12 +8,14 @@ VAI TRÒ LAYER 2:
 - REJECTED từ Layer 1 → Giữ nguyên, KHÔNG xử lý
 - FLAGGED/ACCEPTED → Phân tích thêm bằng Distance + Direction
 
-KIỂM TRA:
-1. Euclidean Distance: di = ||gi - gmedian||
+KIỂM TRA (Tương thích Full Model & Last Layer):
+1. Euclidean Distance: di = ||gi - gref||
    - Vi phạm nếu: di > 1.5 × Median({dj})
+   - Với Full Model: di sẽ lớn hơn nhưng ngưỡng cũng tăng theo tỷ lệ, logic vẫn đúng.
    
-2. Cosine Similarity: Simi = cos(gi, gmedian)
+2. Cosine Similarity: Simi = cos(gi, gref)
    - Vi phạm nếu: Simi ≤ 0.3 (hướng ngược/vuông góc)
+   - Với Full Model: Cosine rất hiệu quả để phát hiện Sign Flip/Label Flip.
 
 MA TRẬN QUYẾT ĐỊNH (Giai đoạn 3 trong PDF):
 ┌─────────────┬──────────────┬─────────────┬──────────────────────┐
@@ -27,13 +29,6 @@ MA TRẬN QUYẾT ĐỊNH (Giai đoạn 3 trong PDF):
 │ ACCEPTED    │ > 0.3        │ fail        │ ACCEPTED (suspicious)│
 │ ACCEPTED    │ > 0.3        │ pass        │ ACCEPTED (clean)     │ ← Chỉ case này mới clean
 └─────────────┴──────────────┴─────────────┴──────────────────────┘
-
-NGUYÊN TẮC: Nếu L1 đã FLAGGED, dù L2 rescue cũng phải giữ SUSPICIOUS
-
-OUTPUT:
-- final_status: Dict[client_id, "REJECTED"/"ACCEPTED"]
-- suspicion_level: Dict[client_id, "clean"/"suspicious"/None]
-  (None cho REJECTED clients - không cần track suspicion)
 """
 
 import numpy as np
@@ -56,8 +51,7 @@ class SuspicionLevel(Enum):
 class Layer2Detector:
     """
     Layer 2 Detector với ma trận cứu vãn (V2 - main.pdf).
-    
-    Nhận input từ Layer 1 và quyết định cuối cùng.
+    Hỗ trợ tham chiếu ngoài (External Reference / Historical Momentum).
     """
     
     def __init__(
@@ -67,15 +61,9 @@ class Layer2Detector:
     ):
         """
         Initialize Layer 2 Detector.
-        
-        Args:
-            distance_multiplier: Multiplier for distance threshold (1.5)
-            cosine_threshold: Threshold for cosine similarity (0.3)
         """
         self.distance_multiplier = distance_multiplier
         self.cosine_threshold = cosine_threshold
-        
-        # Stats for debugging
         self.last_stats = {}
         
         print(f"✅ Layer2Detector V2 initialized:")
@@ -89,22 +77,22 @@ class Layer2Detector:
         layer1_results: Dict[int, str],
         current_round: int = 0,
         is_malicious_ground_truth: Optional[List[bool]] = None,
-        external_reference: Optional[np.ndarray] = None
+        external_reference: Optional[np.ndarray] = None  # <--- QUAN TRỌNG: Nhận Lịch sử từ Server
     ) -> Tuple[Dict[int, str], Dict[int, Optional[str]]]:
         """
         Phân tích Layer 2 dựa trên kết quả Layer 1.
         
         Args:
-            gradients: List gradient arrays
+            gradients: List gradient arrays (Full Model hoặc Last Layer)
             client_ids: List client IDs
             layer1_results: Dict[client_id, status] từ Layer 1
             current_round: Round hiện tại
             is_malicious_ground_truth: Ground truth (optional)
+            external_reference: Vector tham chiếu từ Server (Momentum)
             
         Returns:
             final_status: Dict[client_id, "REJECTED"/"ACCEPTED"]
             suspicion_levels: Dict[client_id, "clean"/"suspicious"/None]
-                - None cho REJECTED clients (không cần track)
         """
         num_clients = len(gradients)
         
@@ -117,9 +105,10 @@ class Layer2Detector:
         # =========================================================
         # STEP 1: Tính toán metrics (cho tất cả clients)
         # =========================================================
+        # Truyền external_reference xuống để tính khoảng cách chuẩn xác
         distances, cosines, median_grad = self._compute_metrics(gradients, reference_vector=external_reference)
         
-        # Tính ngưỡng distance động
+        # Tính ngưỡng distance động (Adaptive Threshold)
         median_distance = np.median(distances)
         distance_threshold = self.distance_multiplier * median_distance
         
@@ -129,7 +118,7 @@ class Layer2Detector:
         final_status = {}
         suspicion_levels = {}
         
-        # Track cho stats
+        # Stats for debugging
         stats = {
             "median_distance": float(median_distance),
             "distance_threshold": float(distance_threshold),
@@ -142,6 +131,7 @@ class Layer2Detector:
             dist = distances[i]
             cos = cosines[i]
             
+            # Logic check vi phạm
             fail_distance = dist > distance_threshold
             fail_cosine = cos <= self.cosine_threshold
             
@@ -151,7 +141,6 @@ class Layer2Detector:
             )
             
             final_status[cid] = result.value
-            # suspicion có thể là None (cho REJECTED) hoặc SuspicionLevel enum
             suspicion_levels[cid] = suspicion.value if suspicion else None
             
             stats["decisions"].append({
@@ -181,29 +170,28 @@ class Layer2Detector:
         reference_vector: Optional[np.ndarray] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Tính Euclidean distance và Cosine similarity với median gradient.
-        
-        Returns:
-            distances: Array of Euclidean distances
-            cosines: Array of Cosine similarities
-            median_grad: Median gradient vector
+        Tính Euclidean distance và Cosine similarity.
+        Hỗ trợ External Reference (Momentum).
         """
-        # Stack gradients
+        # Stack gradients thành ma trận (N x D)
+        # Với Full Model: D ~ 3.2 triệu.
+        # Lưu ý: Có thể tốn RAM, nhưng numpy xử lý tốt nếu RAM > 4GB.
         grad_matrix = np.vstack([g.flatten() for g in gradients])
         
+        # Xác định Vector Tham Chiếu (Reference Vector)
         if reference_vector is not None:
-            # Nếu có Reference từ Server (Lịch sử), dùng nó!
+            # Ưu tiên 1: Dùng Lịch sử từ Server (Chống >50% Attack)
             median_grad = reference_vector
         else:
-            # Nếu không (Vòng 1), tự tính Median của vòng này
+            # Ưu tiên 2: Dùng Median của vòng hiện tại (Fallback)
             median_grad = np.median(grad_matrix, axis=0)
         
-        # Euclidean distances
+        # Euclidean distances: ||gi - gref||
         distances = np.array([
             np.linalg.norm(g - median_grad) for g in grad_matrix
         ])
         
-        # Cosine similarities
+        # Cosine similarities: dot(gi, gref) / (|gi|*|gref|)
         median_norm = np.linalg.norm(median_grad)
         cosines = []
         for g in grad_matrix:
@@ -224,10 +212,6 @@ class Layer2Detector:
     ) -> Tuple[Layer2Result, Optional[SuspicionLevel]]:
         """
         Áp dụng ma trận quyết định theo main.pdf.
-        
-        Returns:
-            result: REJECTED hoặc ACCEPTED
-            suspicion: CLEAN/SUSPICIOUS cho ACCEPTED, None cho REJECTED
         """
         # REJECTED từ Layer 1 → Giữ nguyên
         if layer1_status == "REJECTED":
@@ -261,21 +245,17 @@ class Layer2Detector:
         current_round: int
     ):
         """Log kết quả Layer 2."""
-        # Count by status
         rejected_count = sum(1 for s in final_status.values() if s == "REJECTED")
         accepted_count = sum(1 for s in final_status.values() if s == "ACCEPTED")
         
-        # Count by suspicion (chỉ cho ACCEPTED)
         clean_count = sum(1 for s in suspicion_levels.values() if s == "clean")
         suspicious_count = sum(1 for s in suspicion_levels.values() if s == "suspicious")
         
-        # Count rescued (FLAGGED L1 → ACCEPTED L2)
         rescued = sum(
             1 for cid in client_ids 
             if layer1_results.get(cid) == "FLAGGED" and final_status.get(cid) == "ACCEPTED"
         )
         
-        # Count confirmed (FLAGGED L1 → REJECTED L2)
         confirmed = sum(
             1 for cid in client_ids
             if layer1_results.get(cid) == "FLAGGED" and final_status.get(cid) == "REJECTED"
@@ -295,7 +275,6 @@ class Layer2Detector:
         print(f"      Confirmed (FLAGGED→REJECTED): {confirmed}")
         
         if ground_truth:
-            # Tính metrics cuối cùng
             actual_malicious = [i for i, m in enumerate(ground_truth) if m]
             detected = [i for i, cid in enumerate(client_ids) 
                        if final_status.get(cid) == "REJECTED"]

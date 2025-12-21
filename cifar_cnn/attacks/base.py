@@ -10,7 +10,8 @@ class AttackClient(NumPyClient):
     
     def __init__(self, net, trainloader, testloader, device, 
                  local_epochs, learning_rate=0.001, 
-                 use_mixed_precision=True, proximal_mu=0.01):
+                 use_mixed_precision=True, proximal_mu=0.01,
+                 **kwargs):
         self.net = net
         self.trainloader = trainloader
         self.testloader = testloader

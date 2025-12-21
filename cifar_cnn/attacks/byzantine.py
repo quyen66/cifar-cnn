@@ -9,7 +9,13 @@ class ByzantineClient(AttackClient):
     Đảo dấu vector cập nhật (gradient).
     Nếu tham số dương, gửi về âm và ngược lại.
     """
-    
+    def __init__(self, net, trainloader, testloader, device, local_epochs, 
+                 learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
+                 mode="sign_flip"):
+        super().__init__(net, trainloader, testloader, device, local_epochs, 
+                         learning_rate, use_mixed_precision, proximal_mu)
+        self.mode = mode
+        
     def fit(self, parameters, config):
         # 1. Train bình thường để lấy gradient thực tế
         results = self.train_with_fedprox(parameters)
@@ -37,5 +43,5 @@ class ByzantineClient(AttackClient):
             w_mal = w_g - (scale * update)
             
             malicious_params.append(w_mal)
-        
+        results["is_malicious"] = 1
         return malicious_params, len(self.trainloader.dataset), results

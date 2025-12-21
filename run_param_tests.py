@@ -22,14 +22,14 @@ BASE_SAVE_DIR = "saved_models"
 SAVE_INTERVAL = 10 
 
 ATTACK_SCENARIOS = [
-    "none",            
-    "random_noise",    
-    "gaussian_noise",  
     "sign_flip",       
-    "label_flip",      
-    "backdoor",        
+    "label_flip",    
+    "gaussian_noise",         
     "alie",            
-    "minmax"           
+    "minmax",     
+    "backdoor",
+    "random_noise",
+    "none"           
 ]
 
 # ==============================================================================

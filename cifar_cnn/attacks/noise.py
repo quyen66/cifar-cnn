@@ -11,7 +11,7 @@ class RandomNoiseClient(AttackClient):
     """
     def __init__(self, net, trainloader, testloader, device, local_epochs,
                  learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
-                 scale=0.5):
+                 scale=0.5, mode="random_noise"):
         super().__init__(net, trainloader, testloader, device,
                         local_epochs, learning_rate, use_mixed_precision, proximal_mu)
         self.scale = scale
@@ -33,6 +33,7 @@ class RandomNoiseClient(AttackClient):
             noise = np.random.uniform(-self.scale, self.scale, p.shape).astype(p.dtype)
             noisy_params.append(p + noise)
             
+        results["is_malicious"] = 1
         return noisy_params, len(self.trainloader.dataset), results
 
 
@@ -42,10 +43,10 @@ class GaussianNoiseClient(AttackClient):
     """
     def __init__(self, net, trainloader, testloader, device, local_epochs,
                  learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
-                 std=0.1):
+                 noise_std=0.1, mode="gaussian_noise"):
         super().__init__(net, trainloader, testloader, device,
                         local_epochs, learning_rate, use_mixed_precision, proximal_mu)
-        self.std = std
+        self.std = noise_std
     
     def fit(self, parameters, config):
         # 1. Train bình thường
@@ -64,4 +65,5 @@ class GaussianNoiseClient(AttackClient):
             noise = np.random.standard_normal(p.shape).astype(p.dtype) * self.std
             noisy_params.append(p + noise)
             
+        results["is_malicious"] = 1
         return noisy_params, len(self.trainloader.dataset), results
