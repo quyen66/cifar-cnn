@@ -1,6 +1,8 @@
 """
 Flower client implementation - Updated for 7 Attacks.
-Includes 'is_malicious' flag in fit metrics for accurate server-side evaluation.
+FIX V3: Gửi partition_id trong metrics để server có thể identify clients.
+
+QUAN TRỌNG: File này PHẢI được sử dụng cùng với server_app.py đã fix!
 """
 
 import os
@@ -30,7 +32,8 @@ class FlowerClient(NumPyClient):
     """Normal benign client with FedProx support."""
     
     def __init__(self, net, trainloader, testloader, device, local_epochs, 
-                 learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01):
+                 learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
+                 partition_id=None):  # ===== FIX: Thêm partition_id =====
         self.net = net
         self.trainloader = trainloader
         self.testloader = testloader
@@ -39,6 +42,7 @@ class FlowerClient(NumPyClient):
         self.learning_rate = learning_rate
         self.use_mixed_precision = use_mixed_precision
         self.proximal_mu = proximal_mu
+        self.partition_id = partition_id  # ===== FIX =====
         
     def fit(self, parameters, config):
         set_parameters(self.net, parameters)
@@ -60,16 +64,15 @@ class FlowerClient(NumPyClient):
             global_params
         )
         
-        # --- LOGIC MỚI: Gửi cờ 'is_malicious' về Server ---
-        # Logic: Nếu class hiện tại KHÔNG PHẢI FlowerClient gốc (tức là class con Attack),
-        # thì đánh dấu là Malicious.
+        # --- FIX: Gửi partition_id trong metrics ---
         is_malicious_flag = 0
         if self.__class__.__name__ != "FlowerClient":
              is_malicious_flag = 1
              
         metrics = {
             "train_loss": train_loss["train_loss"],
-            "is_malicious": is_malicious_flag 
+            "is_malicious": is_malicious_flag,
+            "partition_id": self.partition_id  # ===== FIX =====
         }
         
         return get_parameters(self.net), len(self.trainloader.dataset), metrics
@@ -78,6 +81,7 @@ class FlowerClient(NumPyClient):
         set_parameters(self.net, parameters)
         loss, accuracy = test(self.net, self.testloader, self.device)
         return loss, len(self.testloader.dataset), {"accuracy": accuracy}
+
 
 # ============================================
 # CLIENT FACTORY FUNCTION
@@ -126,77 +130,118 @@ def client_fn(context: Context) -> Client:
     if attack_type == "none":
         return FlowerClient(
             net, trainloader, testloader, device, local_epochs, 
-            learning_rate, use_mixed_precision, proximal_mu
+            learning_rate, use_mixed_precision, proximal_mu,
+            partition_id=partition_id  # ===== FIX =====
         ).to_client()
     
     # --- Attack Clients ---
-    # Note: These clients inherit from FlowerClient or implement fit(),
-    # so the is_malicious flag logic will work.
+    # Tạo wrapper function để inject partition_id vào metrics
     
-    elif attack_type == "label_flip":
+    def create_attack_client_with_partition_id(attack_client_class, **kwargs):
+        """Helper to create attack client with partition_id in metrics."""
+        client = attack_client_class(**kwargs)
+        original_fit = client.fit
+        
+        def wrapped_fit(parameters, config):
+            params, num_examples, metrics = original_fit(parameters, config)
+            metrics["partition_id"] = partition_id  # Inject partition_id
+            return params, num_examples, metrics
+        
+        client.fit = wrapped_fit
+        return client
+    
+    if attack_type == "label_flip":
         flip_prob = float(context.run_config.get("flip-probability", 1.0))
         flip_type = context.run_config.get("flip-type", "reverse")
-        return LabelFlippingClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            LabelFlippingClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             flip_probability=flip_prob, flip_type=flip_type
-        ).to_client()
+        )
+        return client.to_client()
         
     elif attack_type == "gaussian_noise":
         noise_std = float(context.run_config.get("gaussian-noise-std", 0.1))
-        return GaussianNoiseClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            GaussianNoiseClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             noise_std=noise_std
-        ).to_client()
+        )
+        return client.to_client()
         
     elif attack_type == "random_noise":
         scale = float(context.run_config.get("random-noise-scale", 0.5))
-        return RandomNoiseClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            RandomNoiseClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             scale=scale
-        ).to_client()
+        )
+        return client.to_client()
         
     elif attack_type == "backdoor":
         target_label = int(context.run_config.get("backdoor-label", 0))
         pixel_count = int(context.run_config.get("backdoor-pixel-count", 4))
-        return BackdoorClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            BackdoorClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             target_label=target_label, pixel_count=pixel_count
-        ).to_client()
+        )
+        return client.to_client()
         
     elif attack_type == "alie":
         z = float(context.run_config.get("alie-z", 1.5))
-        return ALIEClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            ALIEClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             z=z
-        ).to_client()
+        )
+        return client.to_client()
         
     elif attack_type == "minmax":
         gamma = float(context.run_config.get("minmax-gamma", 10.0))
-        return MinMaxClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            MinMaxClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             gamma=gamma
-        ).to_client()
+        )
+        return client.to_client()
     
     elif attack_type == "sign_flip":
-        # ByzantineClient usually handles simple gradient manipulation like sign flip
-        return ByzantineClient(
-            net, trainloader, testloader, device, local_epochs,
-            learning_rate, use_mixed_precision, proximal_mu,
+        client = create_attack_client_with_partition_id(
+            ByzantineClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
             mode="sign_flip"
-        ).to_client()
+        )
+        return client.to_client()
         
     else:
         # Fallback to Benign if unknown attack type
         print(f"⚠️ Unknown attack type '{attack_type}', defaulting to benign.")
         return FlowerClient(
             net, trainloader, testloader, device, local_epochs, 
-            learning_rate, use_mixed_precision, proximal_mu
+            learning_rate, use_mixed_precision, proximal_mu,
+            partition_id=partition_id
         ).to_client()
 
 app = ClientApp(client_fn=client_fn)

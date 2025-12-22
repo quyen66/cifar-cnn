@@ -1,9 +1,9 @@
 """
 Server Application - Trusted Warm-up & Adaptive Defense (V2 - Soft Pipeline)
 =============================================================================
-FULL PRODUCTION VERSION:
-- Logic: Full Model Detection + Historical Momentum.
-- Fixes: Metrics Calculation, Momentum Update, ID Mapping.
+FULL PRODUCTION VERSION with WARMUP BUG FIX:
+- FIX: Warmup trusted client selection bug (seq_id vs partition_id mismatch)
+- Added detailed debug logging
 """
 
 import numpy as np
@@ -96,6 +96,11 @@ class FullPipelineStrategy(FedProx):
         
         self.previous_full_grad = None
         
+        # ===== FIX V2: Pre-init mapping KHÔNG CẦN vì sẽ dùng trực tiếp partition_id =====
+        # Mapping sẽ được xây dựng khi cần từ actual client.cid
+        print(f"   📋 Trusted Clients Set: {sorted(self.trusted_clients)}")
+        # ===== END FIX =====
+        
         if self.enable_defense:
             print("\n" + "="*70)
             print("🛡️  HYBRID DEFENSE V2: SOFT PIPELINE ACTIVATED (FULL MODEL MODE)")
@@ -135,31 +140,31 @@ class FullPipelineStrategy(FedProx):
         self.aggregator = Aggregator(**self.defense_params.get('aggregation', {}))
     
     def _identify_malicious_clients(self) -> Set[int]:
-        # Logic này chỉ mang tính ước lượng ban đầu
-        # Ground Truth chính xác sẽ được lấy từ Metrics của Client gửi về
         return set()
 
     def _identify_trusted_clients(self) -> Set[int]:
-        # Logic chọn Trusted Clients cho Warmup Phase
         num_clients = self.config_metadata.get('num_clients', 40)
         attack_ratio = self.config_metadata.get('attack_ratio', 0.0)
         num_malicious = int(num_clients * attack_ratio)
         
-        # Trong Simulation, partition_id < num_malicious là attacker.
-        # Nên Trusted Clients an toàn là các ID > num_malicious.
-        # Lưu ý: Đây là giả định Partition ID khớp với thứ tự client kết nối.
-        # Nếu Mapping sai, có thể lọt attacker vào warmup (nhưng xác suất thấp nếu dùng logic mới).
         all_clients = list(range(num_clients))
         benign_candidates = all_clients[num_malicious:]
         
         target_trusted = 24
         num_trusted = min(target_trusted, len(benign_candidates))
-        return set(benign_candidates[:num_trusted])
+        trusted = set(benign_candidates[:num_trusted])
+        
+        print(f"   📋 Trusted Clients Configuration:")
+        print(f"      - Total clients: {num_clients}")
+        print(f"      - Attack ratio: {attack_ratio}")
+        print(f"      - Num malicious: {num_malicious} (partition_id 0-{num_malicious-1})")
+        print(f"      - Trusted: partition_id {num_malicious}-{num_malicious + num_trusted - 1}")
+        
+        return trusted
 
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager
     ):
-        # --- GIAI ĐOẠN 1: FORCE TRUSTED WARM-UP ---
         if self.enable_defense and server_round <= self.warmup_rounds:
             print(f"\n⚡ [WARM-UP CONFIG] Round {server_round}: Forcing Trusted Clients.")
             
@@ -167,6 +172,8 @@ class FullPipelineStrategy(FedProx):
             all_real_cids = sorted(list(all_clients_dict.keys()), key=lambda x: int(x))
             
             print(f"   🔍 [DEBUG] Connected Clients: {len(all_real_cids)}")
+            print(f"   🔍 [DEBUG] Sample CIDs: {all_real_cids[:5]}...")
+            
             if not all_real_cids:
                 return [] 
             
@@ -177,21 +184,31 @@ class FullPipelineStrategy(FedProx):
 
             target_clients = []
             
-            for logical_idx in self.trusted_clients:
-                if logical_idx < len(all_real_cids):
-                    real_cid = all_real_cids[logical_idx]
-                    client_proxy = all_clients_dict[real_cid]
+            # ===== FIX: Chọn clients dựa trên partition_id =====
+            for partition_id in self.trusted_clients:
+                cid_str = str(partition_id)
+                if cid_str in all_clients_dict:
+                    client_proxy = all_clients_dict[cid_str]
                     target_clients.append((client_proxy, fit_ins))
+            # ===== END FIX =====
             
             if not target_clients:
-                print(f"   ⚠️  Warning: Mapping thất bại. Activating Fallback.")
-                fallback_count = min(10, len(all_real_cids))
-                for i in range(fallback_count):
-                    real_cid = all_real_cids[i]
-                    client_proxy = all_clients_dict[real_cid]
-                    target_clients.append((client_proxy, fit_ins))
+                print(f"   ⚠️  Warning: Direct mapping failed. Trying index-based.")
+                num_malicious = int(self.config_metadata.get('num_clients', 40) * 
+                                   self.config_metadata.get('attack_ratio', 0.0))
+                for cid_str in all_real_cids:
+                    try:
+                        pid = int(cid_str)
+                        if pid >= num_malicious and len(target_clients) < 24:
+                            client_proxy = all_clients_dict[cid_str]
+                            target_clients.append((client_proxy, fit_ins))
+                    except ValueError:
+                        continue
             
+            selected_cids = [c.cid for c, _ in target_clients[:5]]
             print(f"   ✅ Đã chọn {len(target_clients)} clients cho Warm-up.")
+            print(f"   🔍 [DEBUG] Selected CIDs: {selected_cids}...")
+            
             return target_clients
 
         return super().configure_fit(server_round, parameters, client_manager)
@@ -203,14 +220,6 @@ class FullPipelineStrategy(FedProx):
         failures: List[Tuple[any, FitRes] | BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]] | None:
         
-        # --- BƯỚC 1: XÂY DỰNG MAP ID ---
-        if not self.client_id_to_sequential:
-            all_real_ids_strs = sorted([c.cid for c, _ in results], key=lambda x: int(x))
-            for idx, cid_str in enumerate(all_real_ids_strs):
-                self.client_id_to_sequential[cid_str] = idx
-                self.sequential_to_client_id[idx] = cid_str
-            print(f"   🗺️  ID Mapping Created for {len(all_real_ids_strs)} clients.")
-
         if not results: return None
         should_save = self.auto_save and (server_round % self.save_interval == 0)
 
@@ -227,24 +236,59 @@ class FullPipelineStrategy(FedProx):
             print(f"ROUND {server_round} - PHASE 1: TRUSTED WARM-UP")
             print(f"{'='*70}")
             
+            # ===== FIX V2: Debug logging để xem client.cid =====
+            result_cids = [c.cid for c, _ in results]
+            print(f"   🔍 [DEBUG] Received {len(results)} results")
+            print(f"   🔍 [DEBUG] Result CIDs: {result_cids[:5]}...")
+            # ===== END DEBUG =====
+            
             trusted_grads = []
             trusted_reps = []
+            trusted_count = 0
+            malicious_count = 0
             
             for client, res in results:
-                real_cid_str = client.cid
-                seq_id = self.client_id_to_sequential.get(real_cid_str, -1)
+                # ===== FIX V3: Read partition_id from metrics =====
+                partition_id = res.metrics.get("partition_id", None)
                 
-                if seq_id in self.trusted_clients:
+                if partition_id is None:
+                    continue
+                
+                partition_id = int(partition_id)
+                self.client_id_to_sequential[client.cid] = partition_id
+                self.sequential_to_client_id[partition_id] = client.cid
+                
+                is_mal = bool(res.metrics.get("is_malicious", 0))
+                if is_mal:
+                    malicious_count += 1
+                
+                if partition_id in self.trusted_clients:
+                    trusted_count += 1
+                    
+                    if is_mal:
+                        print(f"   WARNING: Partition {partition_id} trusted but malicious!")
+                        continue
+                    
                     p = parameters_to_ndarrays(res.parameters)
                     grad = np.concatenate([x.flatten() for x in p])
                     trusted_grads.append(grad)
                     
-                    self.noniid_handler.update_client_gradient(seq_id, grad) 
-                    self.reputation_system.initialize_client(seq_id, is_trusted=True)
+                    self.noniid_handler.update_client_gradient(partition_id, grad) 
+                    self.reputation_system.initialize_client(partition_id, is_trusted=True)
                     trusted_reps.append(1.0)
+                # ===== END FIX V3 =====
+
+            print(f"   📊 Warmup Stats:")
+            print(f"      - Results received: {len(results)}")
+            print(f"      - Matched trusted set: {trusted_count}")
+            print(f"      - Used for aggregation: {len(trusted_grads)}")
+            print(f"      - Malicious in batch: {malicious_count}")
 
             if not trusted_grads:
                 print("   ⚠️  No trusted clients sampled in Warm-up. Skipping update.")
+                print(f"   🔍 [DEBUG] Trusted set: {sorted(self.trusted_clients)}")
+                partition_ids = [res.metrics.get("partition_id", "N/A") for _, res in results]
+                print(f"   [DEBUG] Partition IDs from metrics: {partition_ids}")
                 if should_save: self._save_checkpoint(server_round) 
                 return self.current_parameters, {}
 
@@ -261,8 +305,8 @@ class FullPipelineStrategy(FedProx):
             except Exception as e:
                 print(f"   ⚠️ Warning: Momentum update failed in Warmup: {e}")
             
+            print(f"   ✅ Warmup aggregation successful with {len(trusted_grads)} trusted clients")
             print(f"   Heterogeneity Score H = 0.000 (Warmup)") 
-            # Dummy metrics call to populate CSV
             self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0)
             if should_save: self._save_checkpoint(server_round)
             return self.current_parameters, {}
@@ -282,20 +326,24 @@ class FullPipelineStrategy(FedProx):
             full_gradients.append(full_flat)
             
             real_cid_str = c.cid
-            seq_id = self.client_id_to_sequential.get(real_cid_str, -1)
             
-            if seq_id == -1:
-                seq_id = len(self.client_id_to_sequential)
-                self.client_id_to_sequential[real_cid_str] = seq_id
+            # ===== FIX V3: Read partition_id from metrics =====
+            partition_id = res.metrics.get("partition_id", None)
+            if partition_id is not None:
+                seq_id = int(partition_id)
+                self.client_id_to_sequential[c.cid] = seq_id
+                self.sequential_to_client_id[seq_id] = c.cid
+            else:
+                seq_id = self.client_id_to_sequential.get(c.cid, len(self.client_id_to_sequential))
+                if c.cid not in self.client_id_to_sequential:
+                    self.client_id_to_sequential[c.cid] = seq_id
+            # ===== END FIX V3 =====
             
             seq_cids.append(seq_id)
             
-            # --- [METRICS FIX] Get flag from Client Metrics ---
             is_mal = bool(res.metrics.get("is_malicious", 0))
             gt_malicious_batch.append(is_mal)
-            # --------------------------------------------------
 
-        # Debug GT
         num_mal = sum(gt_malicious_batch)
         print(f"   🔍 [DEBUG] Ground Truth from Metrics: {num_mal} attackers in batch.")
 
@@ -318,190 +366,215 @@ class FullPipelineStrategy(FedProx):
             external_reference=reference_vector
         )
 
-        early_rejected = set()
-        candidates = []
-        for cid in seq_cids:
-            if l1_res.get(cid) == "REJECTED" or l2_status.get(cid) == "REJECTED":
-                early_rejected.add(cid)
-            else:
-                candidates.append(cid)
-
-        # 2. Non-IID Analysis
-        for i, cid in enumerate(seq_cids):
-            self.noniid_handler.update_client_gradient(cid, full_gradients[i])
+        # 2. Non-IID Handler: Calculate H Score
+        for local_idx, seq_id in enumerate(seq_cids):
+            self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
         
         H = self.noniid_handler.compute_heterogeneity_score(full_gradients, seq_cids)
-        print(f"   Heterogeneity Score H = {H:.3f}")
+        print(f"\n   🌐 Heterogeneity Score H = {H:.4f}")
         
+        # 3. Confidence Scoring - FIX V3: Correct method name
+        confidence_scores = {}
         baseline_deviations = {}
-        for i, cid in enumerate(seq_cids):
-            devs = self.noniid_handler.compute_baseline_deviation_detailed(cid, full_gradients[i], reference_vector)
-            baseline_deviations[cid] = devs['delta_combined']
-
-        # 3. Confidence Scoring
-        if candidates:
-            conf_scores = self.confidence_scorer.calculate_scores(
-                client_ids=candidates,
-                layer1_results=l1_res,
-                suspicion_levels=l2_suspicion,
-                baseline_deviations=baseline_deviations
+        for i, seq_id in enumerate(seq_cids):
+            detail = self.noniid_handler.compute_baseline_deviation_detailed(
+                seq_id, full_gradients[i], reference_vector
             )
-        else:
-            conf_scores = {}
-
-        # 4. Mode Control
-        detected_cids = list(early_rejected)
-        rho_est = len(detected_cids) / len(seq_cids) if seq_cids else 0.0
-        current_reps = self.reputation_system.get_all_reputations()
-        mode = self.mode_controller.update_mode(rho_est, detected_cids, current_reps, server_round)
+            baseline_deviations[seq_id] = detail['delta_combined']
         
-        print(f"   Mode: {mode} (Est. Threat Ratio: {rho_est:.2%})")
-
-        # 5. Filtering
-        if candidates:
-            trusted, soft_filtered, f_stats = self.two_stage_filter.filter_clients(
-                client_ids=candidates,
-                confidence_scores=conf_scores,
-                reputations=current_reps,
-                mode=mode,
-                H=H,
-                noniid_handler=self.noniid_handler
-            )
-        else:
-            trusted, soft_filtered = set(), set()
+        for local_idx, seq_id in enumerate(seq_cids):
+            is_l1_flagged = l1_res.get(seq_id, {}).get('flagged', False)
+            is_l2_fail = l2_status.get(seq_id, '') == 'REJECTED'
+            delta_i = baseline_deviations.get(seq_id, 0.0)
             
-        total_filtered = early_rejected | soft_filtered
-        
-        print(f"   Trusted: {len(trusted)}")
-        print(f"   Filtered Total: {len(total_filtered)} (Early: {len(early_rejected)} + Soft: {len(soft_filtered)})")
+            ci = self.confidence_scorer.calculate(
+                is_flagged=is_l1_flagged,
+                is_euclidean_fail=is_l2_fail,
+                baseline_deviation=delta_i
+            )
+            confidence_scores[seq_id] = ci
 
-        # 6. Reputation Update
-        for i, cid in enumerate(seq_cids):
-            status = ClientStatus.CLEAN
-            if cid in early_rejected:
-                status = ClientStatus.REJECTED 
-            elif cid in soft_filtered:
-                status = ClientStatus.REJECTED 
-            elif l2_suspicion.get(cid) == "suspicious":
+        # 4. Determine client status and update reputation
+        client_statuses = {}
+        for seq_id in seq_cids:
+            l1_status = l1_res.get(seq_id, {}).get('status', 'ACCEPTED')
+            l2_stat = l2_status.get(seq_id, 'CLEAN')
+            
+            if l1_status == 'REJECTED' or l2_stat == 'REJECTED':
+                status = ClientStatus.REJECTED
+            elif l1_status == 'FLAGGED' or l2_stat == 'SUSPICIOUS':
                 status = ClientStatus.SUSPICIOUS
+            else:
+                status = ClientStatus.CLEAN
+            client_statuses[seq_id] = status
+        
+        # Update reputations
+        for local_idx, seq_id in enumerate(seq_cids):
+            grad = full_gradients[local_idx]
+            status = client_statuses[seq_id]
             
-            self.reputation_system.update(
-                client_id=cid,
-                gradient=full_gradients[i],
-                grad_median=reference_vector,
+            self.reputation_system.update_reputation(
+                client_id=seq_id,
+                gradient=grad,
+                reference_gradient=reference_vector,
                 status=status,
-                heterogeneity_score=H,
-                current_round=server_round
+                H=H
             )
+
+        # 5. Two-Stage Filtering
+        reputations = {seq_id: self.reputation_system.get_reputation(seq_id) 
+                      for seq_id in seq_cids}
+        
+        current_mode = self.mode_controller.get_mode()
+        
+        hard_filtered, soft_filtered = self.two_stage_filter.filter(
+            confidence_scores=confidence_scores,
+            reputations=reputations,
+            H=H,
+            mode=current_mode
+        )
+        
+        all_filtered = hard_filtered | soft_filtered
+        
+        print(f"\n   🔒 Two-Stage Filter (Mode={current_mode}):")
+        print(f"      Hard Filter: {len(hard_filtered)} rejected")
+        print(f"      Soft Filter: {len(soft_filtered)} rejected")
+        print(f"      Total Filtered: {len(all_filtered)}")
+
+        # 6. Mode Controller Update
+        threat_ratio = len(all_filtered) / len(seq_cids) if seq_cids else 0
+        new_mode = self.mode_controller.update(
+            threat_ratio=threat_ratio,
+            reputations=reputations,
+            flagged_clients=all_filtered
+        )
+        
+        if new_mode != current_mode:
+            print(f"   ⚡ Mode Changed: {current_mode} → {new_mode}")
 
         # 7. Aggregation
-        trusted_idxs = [i for i, cid in enumerate(seq_cids) if cid in trusted]
-        final_grads = [full_gradients[i] for i in trusted_idxs]
+        clean_indices = [i for i, seq_id in enumerate(seq_cids) if seq_id not in all_filtered]
+        clean_grads = [full_gradients[i] for i in clean_indices]
+        clean_reps = [reputations[seq_cids[i]] for i in clean_indices]
         
-        rho_actual = len(total_filtered) / len(seq_cids) if seq_cids else 0.0
+        print(f"\n   📦 Aggregation:")
+        print(f"      Clean clients: {len(clean_indices)}/{len(seq_cids)}")
+        print(f"      Mode: {new_mode}")
         
-        if not final_grads:
-            print("   ⚠️  ALL CLIENTS FILTERED. Fallback to Reputation-Weighted Average.")
-            final_grads = full_gradients
-            final_reps = [self.reputation_system.get_reputation(cid) for cid in seq_cids]
-            agg_grad = self.aggregator.aggregate_by_mode(final_grads, "NORMAL", final_reps)
-        else:
-            final_reps = [self.reputation_system.get_reputation(seq_cids[i]) for i in trusted_idxs]
-            agg_grad = self.aggregator.aggregate_by_mode(
-                gradients=final_grads,
-                mode=mode,
-                reputations=final_reps,
-                threat_ratio=rho_actual
-            )
+        if not clean_grads:
+            print("   ⚠️  No clean clients! Using median of all gradients.")
+            agg_grad = self.aggregator.coordinate_median(full_gradients)
+        elif new_mode == "NORMAL":
+            agg_grad = self.aggregator.weighted_average(clean_grads, clean_reps)
+        elif new_mode == "ALERT":
+            agg_grad = self.aggregator.trimmed_mean(clean_grads, threat_ratio)
+        else:  # DEFENSE
+            agg_grad = self.aggregator.coordinate_median(clean_grads)
 
+        self._update_parameters(agg_grad, results[0][1].parameters)
+        
         try:
             if agg_grad is not None:
                 if isinstance(agg_grad, list):
-                     self.previous_full_grad = np.concatenate([x.flatten() for x in agg_grad])
+                    self.previous_full_grad = np.concatenate([x.flatten() for x in agg_grad])
                 else:
-                     self.previous_full_grad = agg_grad.flatten()
+                    self.previous_full_grad = agg_grad.flatten()
         except Exception as e:
-            print(f"   ⚠️ Warning: Momentum update failed (Ignored): {e}")
+            print(f"   ⚠️ Warning: Momentum update failed: {e}")
+
+        # 8. Metrics Calculation
+        self._calculate_metrics(
+            server_round, 
+            seq_cids, 
+            gt_malicious_batch, 
+            all_filtered,
+            H, 
+            threat_ratio,
+            time.time() - start_time
+        )
         
-        self._update_parameters(agg_grad, results[0][1].parameters)
+        if should_save: 
+            self._save_checkpoint(server_round)
         
-        # Calculate final metrics for CSV
-        self._calculate_metrics(server_round, total_filtered, seq_cids, gt_malicious_batch, mode, rho_actual, H)
-        
-        if should_save: self._save_checkpoint(server_round)
-        
-        print(f"⏱️  Defense Duration: {time.time() - start_time:.4f}s")
         return self.current_parameters, {}
 
-    def _update_parameters(self, agg_grad, template_params):
-        agg_params = []
-        offset = 0
-        template = parameters_to_ndarrays(template_params)
-        
-        if isinstance(agg_grad, np.ndarray):
-             for p in template:
-                size = p.size
-                agg_params.append(agg_grad[offset:offset+size].reshape(p.shape))
-                offset += size
-        else:
-            agg_params = agg_grad
-
-        self.current_parameters = ndarrays_to_parameters(agg_params)
-
-    def _calculate_metrics(self, server_round, filtered_cids, batch_seq_ids, batch_gt, new_mode, rho, H):
-        if not batch_seq_ids:
+    def _update_parameters(self, agg_grad, sample_params):
+        if agg_grad is None:
             return
-
-        tp, fp, fn, tn = 0, 0, 0, 0
-        
-        for i, seq_id in enumerate(batch_seq_ids):
-            is_attacker = batch_gt[i]
-            is_filtered = seq_id in filtered_cids
             
-            if is_attacker and is_filtered: tp += 1
-            elif not is_attacker and is_filtered: fp += 1
-            elif is_attacker and not is_filtered: fn += 1
-            elif not is_attacker and not is_filtered: tn += 1
+        sample_shapes = [p.shape for p in parameters_to_ndarrays(sample_params)]
         
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        new_params = []
+        offset = 0
+        for shape in sample_shapes:
+            size = np.prod(shape)
+            param = agg_grad[offset:offset+size].reshape(shape)
+            new_params.append(param)
+            offset += size
         
-        # FPR = FP / (FP + TN)
-        benign_count = fp + tn
-        fpr = fp / benign_count if benign_count > 0 else 0.0
+        self.current_parameters = ndarrays_to_parameters(new_params)
+
+    def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, threat_ratio, elapsed):
+        if not seq_cids:
+            print(f"\n📊 METRICS ROUND {server_round}")
+            print(f"   (Warmup - No detection metrics)")
+            return
+            
+        tp = fp = fn = tn = 0
+        
+        for i, seq_id in enumerate(seq_cids):
+            is_mal = gt_malicious[i]
+            is_detected = seq_id in detected
+            
+            if is_mal and is_detected:
+                tp += 1
+            elif is_mal and not is_detected:
+                fn += 1
+            elif not is_mal and is_detected:
+                fp += 1
+            else:
+                tn += 1
         
         self.total_tp += tp
         self.total_fp += fp
         
-        metric_record = {
-            "round": int(server_round),
-            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn),
-            "precision": float(precision), "recall": float(recall), "f1": float(f1), "fpr": float(fpr),
-            "mode": str(new_mode), "rho": float(rho), "H": float(H)
-        }
-        self.detection_history.append(metric_record)
-
         print(f"\n📊 METRICS ROUND {server_round}")
         print(f"   TP={tp}, FP={fp}, FN={fn}, TN={tn}")
-        print(f"   Precision={precision:.2f}, Recall={recall:.2f}, F1={f1:.2f}, FPR={fpr:.2f}")
+        
+        if tp + fn > 0:
+            detection_rate = tp / (tp + fn)
+            print(f"   Detection Rate: {detection_rate:.2%}")
+        
+        if tp + fp > 0:
+            precision = tp / (tp + fp)
+            print(f"   Precision: {precision:.2%}")
+            
+        if fp + tn > 0:
+            fpr = fp / (fp + tn)
+            print(f"   False Positive Rate: {fpr:.2%}")
+        
+        print(f"   H={H:.4f}, Threat Ratio={threat_ratio:.2%}")
+        print(f"   Time: {elapsed:.2f}s")
+        
+        mal_indices = [i for i, m in enumerate(gt_malicious) if m]
+        if mal_indices:
+            detected_mal = [seq_cids[i] for i in mal_indices if seq_cids[i] in detected]
+            print(f"   True Positives: {len(detected_mal)}/{len(mal_indices)} malicious detected")
 
     def _save_checkpoint(self, server_round):
-        if not self.current_parameters: return
+        if not self.auto_save or self.current_parameters is None:
+            return
+            
+        os.makedirs(self.save_dir, exist_ok=True)
+        
+        params = parameters_to_ndarrays(self.current_parameters)
+        net = get_model()
+        set_parameters(net, params)
+        
+        path = os.path.join(self.save_dir, f"round_{server_round}.pt")
         try:
-            print(f"💾 Saving checkpoint for Round {server_round}...")
-            net = get_model()
-            set_parameters(net, parameters_to_ndarrays(self.current_parameters))
-            metadata = {
-                "timestamp": datetime.now().isoformat(),
-                "round": server_round,
-                "config": self.config_metadata,
-                "metrics_history": self.detection_history
-            }
-            ModelManager(save_dir=self.save_dir).save_model(
-                net, metadata, model_name=f"model_r{server_round}"
-            )
-            print(f"✅ Checkpoint saved.")
+            torch.save(net.state_dict(), path)
+            print(f"   💾 Saved checkpoint: {path}")
         except Exception as e:
             print(f"❌ Error saving checkpoint: {e}")
 
