@@ -112,7 +112,7 @@ def create_non_iid_partitions(dataset, num_clients, num_classes=10, classes_per_
 
 
 def get_client_dataloader(dataset, client_indices, batch_size=32, is_train=True,
-                          num_workers=4, pin_memory=True):
+                          num_workers=0, pin_memory=True):
     subset = Subset(dataset, client_indices)
     return DataLoader(
         subset, batch_size=batch_size, shuffle=is_train,
@@ -122,7 +122,7 @@ def get_client_dataloader(dataset, client_indices, batch_size=32, is_train=True,
 
 
 def prepare_datasets(client_id, num_clients, batch_size=32, partition_type="iid", alpha=0.5,
-                    num_workers=4, pin_memory=True):
+                    num_workers=0, pin_memory=True):
     """
     Prepare datasets for a client - FIXED to handle dynamic client_id.
     

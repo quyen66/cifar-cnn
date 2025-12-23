@@ -33,7 +33,7 @@ num-clients = 40
 num-server-rounds = 30
 fraction-fit = 0.6
 fraction-evaluate = 0.2
-min-fit-clients = 23
+min-fit-clients = 24
 min-evaluate-clients = 6
 min-available-clients = 40
 
@@ -46,20 +46,23 @@ partition-type = "non-iid"
 alpha = 0.5
 
 use-mixed-precision = true
-num-workers = 2
+num-workers = 0
 pin-memory = true
-persistent-workers = true
+#persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg2_cluster_emphasis/sign_flip"
+save-dir = "saved_models/Cfg1_cluster_emphasis/gaussian_noise"
 save-interval = 10
 resume-from = ""
+
+# cỉa-10 , mnist, femnist
+dataset = "cifar-10"
 
 enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax"
-attack-type = "sign_flip" 
+attack-type = "gaussian_noise" 
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
@@ -108,10 +111,10 @@ warmup-rounds = 10
 
 pca-dims = 20
 dbscan-min-samples = 3
-dbscan-eps-multiplier = 0.6
+dbscan-eps-multiplier = 0.7
 mad-k-reject = 15.0
-mad-k-flag = 4.0
-voting-threshold = 2
+mad-k-flag = 6.0
+voting-threshold = 3
 
 # =====================================================================
 # LAYER 2: DISTANCE + DIRECTION (V2 - Ma trận cứu vãn)
@@ -119,8 +122,8 @@ voting-threshold = 2
 # CHỈ CHẠY SAU WARMUP
 [tool.flwr.app.config.defense.layer2]
 
-distance-multiplier = 2.0
-cosine-threshold = 0.4
+distance-multiplier = 1.5
+cosine-threshold = 0.3
 
 # =====================================================================
 # NON-IID HANDLER (V2)
@@ -131,9 +134,9 @@ cosine-threshold = 0.4
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.1
-weight-sim = 0.2
-weight-cluster = 0.7
+weight-cv = 0.4
+weight-sim = 0.4
+weight-cluster = 0.2
 
 # θ_adj parameters (PDF: θ_base + (H-0.5) × factor)
 adjustment-factor = 0.3
@@ -166,8 +169,8 @@ grad-ema-decay = 0.3
 [tool.flwr.app.config.defense.filtering]
 
 # Ngưỡng cơ sở (θ_base)
-hard-threshold-base = 0.75
-soft-threshold-base = 0.45
+hard-threshold-base = 0.85
+soft-threshold-base = 0.5
 
 # τ_mode - ngưỡng reputation theo mode
 soft-rep-threshold-normal = 0.2
@@ -333,5 +336,5 @@ default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 40
-options.backend.client-resources.num-cpus = 4
-options.backend.client-resources.num-gpus = 0.01
+options.backend.client-resources.num-cpus = 8
+options.backend.client-resources.num-gpus = 0.05

@@ -95,6 +95,7 @@ class FullPipelineStrategy(FedProx):
         self.total_fp = 0
         
         self.previous_full_grad = None
+        self.warmup_client_proxies = None # cố định client proxies trong warmup
         
         # ===== FIX V2: Pre-init mapping KHÔNG CẦN vì sẽ dùng trực tiếp partition_id =====
         # Mapping sẽ được xây dựng khi cần từ actual client.cid
@@ -182,28 +183,24 @@ class FullPipelineStrategy(FedProx):
                 config = self.on_fit_config_fn(server_round)
             fit_ins = FitIns(parameters, config)
 
-            target_clients = []
-            
-            # ===== FIX: Chọn clients dựa trên partition_id =====
-            for partition_id in self.trusted_clients:
-                cid_str = str(partition_id)
-                if cid_str in all_clients_dict:
-                    client_proxy = all_clients_dict[cid_str]
-                    target_clients.append((client_proxy, fit_ins))
-            # ===== END FIX =====
-            
-            if not target_clients:
-                print(f"   ⚠️  Warning: Direct mapping failed. Trying index-based.")
-                num_malicious = int(self.config_metadata.get('num_clients', 40) * 
-                                   self.config_metadata.get('attack_ratio', 0.0))
-                for cid_str in all_real_cids:
-                    try:
-                        pid = int(cid_str)
-                        if pid >= num_malicious and len(target_clients) < 24:
-                            client_proxy = all_clients_dict[cid_str]
-                            target_clients.append((client_proxy, fit_ins))
-                    except ValueError:
-                        continue
+            if server_round == 1:
+                # Round 1: Gửi đến TẤT CẢ clients để lấy mapping cid → partition_id
+                print(f"   📌 [WARMUP] Round 1: Sending to ALL {len(all_real_cids)} clients to discover mapping")
+                target_proxies = [all_clients_dict[cid] for cid in all_real_cids]
+                # Lưu tạm, sẽ được filter trong aggregate_fit
+                self.warmup_client_proxies = None  # Sẽ set trong aggregate_fit
+                
+            else:
+                # Round 2-10: Dùng trusted proxies đã lưu từ aggregate_fit round 1
+                print(f"   📌 [WARMUP] Round {server_round}: REUSING {len(self.warmup_client_proxies) if self.warmup_client_proxies else 0} trusted client proxies")
+                
+                if self.warmup_client_proxies:
+                    target_proxies = self.warmup_client_proxies
+                else:
+                    print(f"   ⚠️  No saved proxies! Falling back to all clients.")
+                    target_proxies = [all_clients_dict[cid] for cid in all_real_cids]            
+            # Tạo target_clients với fit_ins mới (parameters mỗi round khác nhau)
+            target_clients = [(proxy, fit_ins) for proxy in target_proxies]
             
             selected_cids = [c.cid for c, _ in target_clients[:5]]
             print(f"   ✅ Đã chọn {len(target_clients)} clients cho Warm-up.")
@@ -236,7 +233,7 @@ class FullPipelineStrategy(FedProx):
             print(f"ROUND {server_round} - PHASE 1: TRUSTED WARM-UP")
             print(f"{'='*70}")
             
-            # ===== FIX V2: Debug logging để xem client.cid =====
+            # ===== Debug logging để xem client.cid =====
             result_cids = [c.cid for c, _ in results]
             print(f"   🔍 [DEBUG] Received {len(results)} results")
             print(f"   🔍 [DEBUG] Result CIDs: {result_cids[:5]}...")
@@ -246,9 +243,10 @@ class FullPipelineStrategy(FedProx):
             trusted_reps = []
             trusted_count = 0
             malicious_count = 0
+            trusted_proxies_round1 = []  # Lưu trusted proxies
             
             for client, res in results:
-                # ===== FIX V3: Read partition_id from metrics =====
+                # ===== Read partition_id from metrics =====
                 partition_id = res.metrics.get("partition_id", None)
                 
                 if partition_id is None:
@@ -269,6 +267,9 @@ class FullPipelineStrategy(FedProx):
                         print(f"   WARNING: Partition {partition_id} trusted but malicious!")
                         continue
                     
+                    # Lưu proxy của trusted client
+                    trusted_proxies_round1.append(client)
+                    
                     p = parameters_to_ndarrays(res.parameters)
                     grad = np.concatenate([x.flatten() for x in p])
                     trusted_grads.append(grad)
@@ -276,8 +277,12 @@ class FullPipelineStrategy(FedProx):
                     self.noniid_handler.update_client_gradient(partition_id, grad) 
                     self.reputation_system.initialize_client(partition_id, is_trusted=True)
                     trusted_reps.append(1.0)
-                # ===== END FIX V3 =====
-
+                
+            if server_round == 1:
+                self.warmup_client_proxies = trusted_proxies_round1
+                print(f"   💾 [FIX V8] Saved {len(trusted_proxies_round1)} TRUSTED proxies for rounds 2-10")
+                       
+            
             print(f"   📊 Warmup Stats:")
             print(f"      - Results received: {len(results)}")
             print(f"      - Matched trusted set: {trusted_count}")
@@ -373,8 +378,7 @@ class FullPipelineStrategy(FedProx):
         H = self.noniid_handler.compute_heterogeneity_score(full_gradients, seq_cids)
         print(f"\n   🌐 Heterogeneity Score H = {H:.4f}")
         
-        # 3. Confidence Scoring - FIX V3: Correct method name
-        confidence_scores = {}
+        # 3. Confidence Scoring - FIX V4: Use correct method calculate_scores
         baseline_deviations = {}
         for i, seq_id in enumerate(seq_cids):
             detail = self.noniid_handler.compute_baseline_deviation_detailed(
@@ -382,71 +386,80 @@ class FullPipelineStrategy(FedProx):
             )
             baseline_deviations[seq_id] = detail['delta_combined']
         
-        for local_idx, seq_id in enumerate(seq_cids):
-            is_l1_flagged = l1_res.get(seq_id, {}).get('flagged', False)
-            is_l2_fail = l2_status.get(seq_id, '') == 'REJECTED'
-            delta_i = baseline_deviations.get(seq_id, 0.0)
-            
-            ci = self.confidence_scorer.calculate(
-                is_flagged=is_l1_flagged,
-                is_euclidean_fail=is_l2_fail,
-                baseline_deviation=delta_i
-            )
-            confidence_scores[seq_id] = ci
+        # FIX V4: Use calculate_scores with correct signature
+        confidence_scores = self.confidence_scorer.calculate_scores(
+            client_ids=seq_cids,
+            layer1_results=l1_res,
+            suspicion_levels=l2_suspicion,
+            baseline_deviations=baseline_deviations
+        )
 
         # 4. Determine client status and update reputation
         client_statuses = {}
         for seq_id in seq_cids:
-            l1_status = l1_res.get(seq_id, {}).get('status', 'ACCEPTED')
-            l2_stat = l2_status.get(seq_id, 'CLEAN')
+            # FIX V4: l1_res returns string, l2_status is REJECTED/ACCEPTED, l2_suspicion is clean/suspicious
+            l1_status = l1_res.get(seq_id, 'ACCEPTED')
+            l2_stat = l2_status.get(seq_id, 'ACCEPTED')
+            l2_susp = l2_suspicion.get(seq_id, 'clean')
             
             if l1_status == 'REJECTED' or l2_stat == 'REJECTED':
                 status = ClientStatus.REJECTED
-            elif l1_status == 'FLAGGED' or l2_stat == 'SUSPICIOUS':
+            elif l1_status == 'FLAGGED' or l2_susp == 'suspicious':
                 status = ClientStatus.SUSPICIOUS
             else:
                 status = ClientStatus.CLEAN
             client_statuses[seq_id] = status
         
-        # Update reputations
+        # Update reputations - FIX V5: Use correct method name and params
+        grad_median = np.median(np.vstack(full_gradients), axis=0)
         for local_idx, seq_id in enumerate(seq_cids):
             grad = full_gradients[local_idx]
             status = client_statuses[seq_id]
             
-            self.reputation_system.update_reputation(
+            self.reputation_system.update(
                 client_id=seq_id,
                 gradient=grad,
-                reference_gradient=reference_vector,
+                grad_median=grad_median,
                 status=status,
-                H=H
+                heterogeneity_score=H,
+                current_round=server_round
             )
 
-        # 5. Two-Stage Filtering
+        # 5. Two-Stage Filtering - FIX V5: Use correct method name and params
         reputations = {seq_id: self.reputation_system.get_reputation(seq_id) 
                       for seq_id in seq_cids}
         
-        current_mode = self.mode_controller.get_mode()
+        current_mode = self.mode_controller.get_current_mode()
         
-        hard_filtered, soft_filtered = self.two_stage_filter.filter(
+        trusted_set, all_filtered, filter_stats = self.two_stage_filter.filter_clients(
+            client_ids=seq_cids,
             confidence_scores=confidence_scores,
             reputations=reputations,
+            mode=current_mode,
             H=H,
-            mode=current_mode
+            noniid_handler=self.noniid_handler
         )
         
-        all_filtered = hard_filtered | soft_filtered
+        hard_filtered = set(filter_stats.get('hard_filtered_ids', []))
+        soft_filtered = set(filter_stats.get('soft_filtered_ids', []))
+        
+        detection_rejected = {seq_id for seq_id in seq_cids 
+                             if client_statuses.get(seq_id) == ClientStatus.REJECTED}
+        all_filtered = all_filtered | detection_rejected  # Union 2 sets
         
         print(f"\n   🔒 Two-Stage Filter (Mode={current_mode}):")
         print(f"      Hard Filter: {len(hard_filtered)} rejected")
         print(f"      Soft Filter: {len(soft_filtered)} rejected")
+        print(f"      Detection Rejected (L1+L2): {len(detection_rejected)}")
         print(f"      Total Filtered: {len(all_filtered)}")
-
-        # 6. Mode Controller Update
+        
+        # 6. Mode Controller Update - FIX V4: Use update_mode with correct signature
         threat_ratio = len(all_filtered) / len(seq_cids) if seq_cids else 0
-        new_mode = self.mode_controller.update(
+        new_mode = self.mode_controller.update_mode(
             threat_ratio=threat_ratio,
+            detected_clients=list(all_filtered),
             reputations=reputations,
-            flagged_clients=all_filtered
+            current_round=server_round
         )
         
         if new_mode != current_mode:
@@ -507,7 +520,7 @@ class FullPipelineStrategy(FedProx):
         new_params = []
         offset = 0
         for shape in sample_shapes:
-            size = np.prod(shape)
+            size = int(np.prod(shape))  # FIX: Convert to int for slicing
             param = agg_grad[offset:offset+size].reshape(shape)
             new_params.append(param)
             offset += size
