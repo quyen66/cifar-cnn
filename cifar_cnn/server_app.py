@@ -114,7 +114,9 @@ class FullPipelineStrategy(FedProx):
         self.layer1_detector = Layer1Detector(**self.defense_params.get('layer1', {}))
         self.layer2_detector = Layer2Detector(**self.defense_params.get('layer2', {}))
         self.noniid_handler = NonIIDHandler(**self.defense_params.get('noniid', {}))
-        self.confidence_scorer = ConfidenceScorer(**self.defense_params.get('confidence', {}))
+        self.confidence_scorer = ConfidenceScorer(**self.defense_params.get('confidence', {}), 
+                                                  rescued_penalty=self.defense_params.get('confidence', {}).get('rescued_penalty', 0.3),
+                                                  rescued_suspicious_penalty=self.defense_params.get('confidence', {}).get('rescued-suspicious-penalty', 0.7))
         self.two_stage_filter = TwoStageFilter(**self.defense_params.get('filtering', {}))
         self.mode_controller = ModeController(**self.defense_params.get('mode', {}))
         
@@ -216,7 +218,7 @@ class FullPipelineStrategy(FedProx):
         results: List[Tuple[any, FitRes]],
         failures: List[Tuple[any, FitRes] | BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]] | None:
-        
+        start_time = time.time()
         if not results: return None
         should_save = self.auto_save and (server_round % self.save_interval == 0)
 
@@ -245,6 +247,10 @@ class FullPipelineStrategy(FedProx):
             malicious_count = 0
             trusted_proxies_round1 = []  # Lưu trusted proxies
             
+            global_weights_warmup = parameters_to_ndarrays(self.current_parameters)
+            global_flat = np.concatenate([x.flatten() for x in global_weights_warmup])
+            print(f"   📐 Global weights norm: {np.linalg.norm(global_flat):.4f}")
+            
             for client, res in results:
                 # ===== Read partition_id from metrics =====
                 partition_id = res.metrics.get("partition_id", None)
@@ -271,10 +277,11 @@ class FullPipelineStrategy(FedProx):
                     trusted_proxies_round1.append(client)
                     
                     p = parameters_to_ndarrays(res.parameters)
-                    grad = np.concatenate([x.flatten() for x in p])
-                    trusted_grads.append(grad)
+                    w_client_flat = np.concatenate([x.flatten() for x in p])
+                    update_flat = w_client_flat - global_flat  # UPDATE = W_client - W_global
+                    trusted_grads.append(update_flat)
                     
-                    self.noniid_handler.update_client_gradient(partition_id, grad) 
+                    self.noniid_handler.update_client_gradient(partition_id, update_flat) 
                     self.reputation_system.initialize_client(partition_id, is_trusted=True)
                     trusted_reps.append(1.0)
                 
@@ -325,10 +332,16 @@ class FullPipelineStrategy(FedProx):
         seq_cids = []
         gt_malicious_batch = []
         
+        global_weights = parameters_to_ndarrays(self.current_parameters)
+        global_flat = np.concatenate([x.flatten() for x in global_weights])
+
         for c, res in results:
             p = parameters_to_ndarrays(res.parameters)
-            full_flat = np.concatenate([x.flatten() for x in p])
-            full_gradients.append(full_flat)
+            w_client_flat = np.concatenate([x.flatten() for x in p])
+            # Tính vector cập nhật (Update / Pseudo-gradient)
+            # update = w_client - w_global
+            update_flat = w_client_flat - global_flat
+            full_gradients.append(update_flat)
             
             real_cid_str = c.cid
             
@@ -386,10 +399,10 @@ class FullPipelineStrategy(FedProx):
             )
             baseline_deviations[seq_id] = detail['delta_combined']
         
-        # FIX V4: Use calculate_scores with correct signature
         confidence_scores = self.confidence_scorer.calculate_scores(
             client_ids=seq_cids,
             layer1_results=l1_res,
+            layer2_status=l2_status,
             suspicion_levels=l2_suspicion,
             baseline_deviations=baseline_deviations
         )
@@ -509,24 +522,37 @@ class FullPipelineStrategy(FedProx):
         if should_save: 
             self._save_checkpoint(server_round)
         
+        print(f"⏱️ [ROUND {server_round}] Server Processing Time: {time.time() - start_time:.4f}s")
         return self.current_parameters, {}
 
     def _update_parameters(self, agg_grad, sample_params):
         if agg_grad is None:
             return
             
+        # 1. Lấy cấu trúc shape từ sample parameters
         sample_shapes = [p.shape for p in parameters_to_ndarrays(sample_params)]
+        
+        # 2. Lấy trọng số Global cũ (W_old)
+        global_old = parameters_to_ndarrays(self.current_parameters)
         
         new_params = []
         offset = 0
-        for shape in sample_shapes:
-            size = int(np.prod(shape))  # FIX: Convert to int for slicing
-            param = agg_grad[offset:offset+size].reshape(shape)
-            new_params.append(param)
+        
+        for i, shape in enumerate(sample_shapes):
+            size = int(np.prod(shape))
+            # Lấy phần update tương ứng (Delta W) từ kết quả Aggregation
+            update_part = agg_grad[offset:offset+size].reshape(shape)
+            
+            # [CHÍNH XÁC] Cộng thẳng Update vào Weight cũ
+            # W_new = W_old + Delta_W_agg
+            new_param_val = global_old[i] + update_part
+            
+            new_params.append(new_param_val)
             offset += size
         
+        # Cập nhật tham số toàn cục mới
         self.current_parameters = ndarrays_to_parameters(new_params)
-
+        
     def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, threat_ratio, elapsed):
         if not seq_cids:
             print(f"\n📊 METRICS ROUND {server_round}")
@@ -628,7 +654,8 @@ def server_fn(context: Context) -> ServerAppComponents:
         }
         defense_params['layer2'] = {
             'distance_multiplier': float(context.run_config.get("defense.layer2.distance-multiplier", 1.5)),
-            'cosine_threshold': float(context.run_config.get("defense.layer2.cosine-threshold", 0.3))
+            'cosine_threshold': float(context.run_config.get("defense.layer2.cosine-threshold", 0.3)),
+            #'enable_rescue': context.run_config.get("defense.layer2.enable-rescue", False) 
         }
         defense_params['noniid'] = {
             'weight_cv': float(context.run_config.get("defense.noniid.weight-cv", 0.4)),

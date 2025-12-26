@@ -30,7 +30,7 @@ clientapp = "cifar_cnn.client_app:app"
 [tool.flwr.app.config]
 
 num-clients = 40
-num-server-rounds = 30
+num-server-rounds = 50
 fraction-fit = 0.6
 fraction-evaluate = 0.2
 min-fit-clients = 24
@@ -38,7 +38,7 @@ min-evaluate-clients = 6
 min-available-clients = 40
 
 local-epochs = 5
-batch-size = 64
+batch-size = 128
 learning-rate = 0.001
 proximal-mu = 0.01
 
@@ -46,9 +46,9 @@ partition-type = "non-iid"
 alpha = 0.5
 
 use-mixed-precision = true
-num-workers = 0
+num-workers = 2
 pin-memory = true
-#persistent-workers = true
+persistent-workers = true
 
 auto-save = true
 save-dir = "saved_models/Cfg1_cluster_emphasis/gaussian_noise"
@@ -66,10 +66,10 @@ attack-type = "gaussian_noise"
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
-random-noise-scale = 0.5    # Biên độ nhiễu Uniform [-scale, scale]
+random-noise-scale = 0.7   # Biên độ nhiễu Uniform [-scale, scale]
 
 # 2. Gaussian Noise
-gaussian-noise-std = 0.2    # Độ lệch chuẩn của nhiễu Gaussian
+gaussian-noise-std = 0.3  # Độ lệch chuẩn của nhiễu Gaussian
 
 # 4. Label Flipping
 flip-probability = 1.0
@@ -81,10 +81,10 @@ backdoor-pixel-count = 4    # Số lượng pixel trigger
 backdoor-pattern-size = 3   # Kích thước vùng trigger
 
 # 6. ALIE (A Little Is Enough)
-alie-z = 1.5                # Hệ số z (thường 1.0 - 2.0)
+alie-z = 2              # Hệ số z 
 
 # 7. Min-Max
-minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
+minmax-gamma = 15.0         # Hệ số scale cho Min-Max attack
 
 # =====================================================================
 # WARMUP PHASE (Vòng 1-10)
@@ -111,13 +111,13 @@ warmup-rounds = 10
 
 pca-dims = 20
 dbscan-min-samples = 3
-dbscan-eps-multiplier = 0.7
-mad-k-reject = 15.0
-mad-k-flag = 6.0
+dbscan-eps-multiplier = 0.5
+mad-k-reject = 10.0
+mad-k-flag = 5.0
 voting-threshold = 3
 
 # =====================================================================
-# LAYER 2: DISTANCE + DIRECTION (V2 - Ma trận cứu vãn)
+# LAYER 2: DISTANCE + DIRECTION 
 # =====================================================================
 # CHỈ CHẠY SAU WARMUP
 [tool.flwr.app.config.defense.layer2]
@@ -126,7 +126,7 @@ distance-multiplier = 1.5
 cosine-threshold = 0.3
 
 # =====================================================================
-# NON-IID HANDLER (V2)
+# NON-IID HANDLER
 # =====================================================================
 # H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
 # θ_adj = clip(θbase + (H-0.5)×0.4, 0.5, 0.9)
@@ -138,7 +138,7 @@ weight-cv = 0.4
 weight-sim = 0.4
 weight-cluster = 0.2
 
-# θ_adj parameters (PDF: θ_base + (H-0.5) × factor)
+# θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
 adjustment-factor = 0.3
 theta-adj-clip-min = 0.5
 theta-adj-clip-max = 0.9
@@ -153,9 +153,23 @@ delta-direction-weight = 0.5
 # EMA decay cho running mean gradient
 grad-ema-decay = 0.3
 
+# =====================================================================
+# CONFIDENCE SCORING 
+# =====================================================================
+# ci = clip((0.4×I_Flagged + 0.3×I_Fail_Euclidean + 0.3×δi) × factor, 0, 1)
+# =====================================================================
+[tool.flwr.app.config.defense.confidence]
+
+weight-flagged = 0.4
+weight-euclidean = 0.3
+weight-baseline = 0.3
+baseline-suspicious-threshold = 0.25
+baseline-factor-suspicious = 0.7
+rescued-penalty = 0.4 
+rescued-suspicious-penalty = 0.7
 
 # =====================================================================
-# TWO-STAGE FILTERING (V2)
+# TWO-STAGE FILTERING 
 # =====================================================================
 # CHỈ CHẠY SAU WARMUP
 # Hard: ci > θ_adj(base=0.85)
@@ -170,7 +184,7 @@ grad-ema-decay = 0.3
 
 # Ngưỡng cơ sở (θ_base)
 hard-threshold-base = 0.85
-soft-threshold-base = 0.5
+soft-threshold-base = 0.65
 
 # τ_mode - ngưỡng reputation theo mode
 soft-rep-threshold-normal = 0.2
@@ -198,25 +212,25 @@ soft-rep-threshold-defense = 0.6
 
 # --- EMA Parameters (Asymmetric Update) ---
 # α khi reputation TĂNG (slow reward - cho cơ hội chứng minh)
-ema-alpha-increase = 0.15
+ema-alpha-increase = 0.1
 # α khi reputation GIẢM (fast penalty - phản ứng nhanh với tấn công)
-ema-alpha-decrease = 0.4
+ema-alpha-decrease = 0.5
 
 # --- Lambda Penalty Parameters ---
 # λ cho clean clients (không bị flag ở bất kỳ layer nào)
 lambda-clean = 1.0
 # λ cho suspicious clients (bị Layer1 flag nhưng được Layer2 rescue)
 # λ = base + h_mult × H → [0.6, 0.8] khi H ∈ [0, 1]
-lambda-suspicious-base = 0.6
+lambda-suspicious-base = 0.5
 lambda-suspicious-h-mult = 0.2
 # λ cho rejected clients (bị detection loại bỏ)
 # λ = base + h_mult × H → [0.1, 0.5] khi H ∈ [0, 1]
-lambda-rejected-base = 0.1
-lambda-rejected-h-mult = 0.4
+lambda-rejected-base = 0.05
+lambda-rejected-h-mult = 0.3
 
 # --- Probation Parameters (Floor Lifting) ---
 # Ngưỡng R để client vào probation (theo dõi đặc biệt)
-floor-warning-threshold = 0.2
+floor-warning-threshold = 0.25
 # Số vòng hành vi tốt liên tục để thoát probation
 floor-probation-rounds = 5
 
@@ -267,8 +281,8 @@ history-window-size = 10
 [tool.flwr.app.config.defense.mode]
 
 # Threshold Parameters - Ngưỡng chuyển mode
-threshold-normal-to-alert = 0.15   # ρ > 0.15 → ALERT
-threshold-alert-to-defense = 0.30  # ρ > 0.30 → DEFENSE
+threshold-normal-to-alert = 0.20   # ρ > 0.15 → ALERT
+threshold-alert-to-defense = 0.35  # ρ > 0.30 → DEFENSE
 
 # Hysteresis - Yêu cầu ổn định
 hysteresis-rounds = 2              # Số vòng ổn định để chuyển mode
@@ -278,7 +292,7 @@ trust-breach-count = 3             # Số clients tin cậy bị flag để trig
 trust-breach-threshold = 0.85      # Ngưỡng R để coi là "tin cậy cao"
 
 # Gate 2: Reputation Drop - Sụt giảm uy tín
-rep-drop-threshold = 0.10          # % drop rep trung bình để trigger (10%)
+rep-drop-threshold = 0.08          # % drop rep trung bình để trigger (10%)
 
 # Initial State
 initial-mode = "NORMAL"            # Mode khởi tạo
@@ -316,19 +330,6 @@ use-reputation-weights = true      # Dùng reputation làm weight
 uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
 
 # =====================================================================
-# CONFIDENCE SCORING (V2)
-# =====================================================================
-# ci = clip((0.4×I_Flagged + 0.3×I_Fail_Euclidean + 0.3×δi) × factor, 0, 1)
-# =====================================================================
-[tool.flwr.app.config.defense.confidence]
-
-weight-flagged = 0.3
-weight-euclidean = 0.3
-weight-baseline = 0.3
-baseline-suspicious-threshold = 0.3
-baseline-factor-suspicious = 0.8
-
-# =====================================================================
 # FEDERATION
 # =====================================================================
 [tool.flwr.federations]
@@ -336,5 +337,5 @@ default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 40
-options.backend.client-resources.num-cpus = 8
+options.backend.client-resources.num-cpus = 1
 options.backend.client-resources.num-gpus = 0.05

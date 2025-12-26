@@ -268,7 +268,7 @@ class NonIIDHandler:
         Tính ngưỡng thích ứng theo công thức PDF.
         
         Formula (PDF Giai đoạn 3):
-            θ_adj = clip(θbase + (H - 0.5) × 0.4, 0.5, 0.9)
+            θ_adj = clip(θbase + (0.5 - H) × 0.4, 0.5, 0.9)
         
         Logic:
         - H = 0.5 (trung bình) → θ_adj = θbase
@@ -282,8 +282,7 @@ class NonIIDHandler:
         Returns:
             Adaptive threshold θ_adj
         """
-        # Công thức đúng theo PDF
-        theta_adj = theta_base + (H - 0.5) * self.adjustment_factor
+        theta_adj = theta_base + (0.5 - H) * self.adjustment_factor
         
         # Clip theo range cho phép
         theta_adj = np.clip(theta_adj, self.theta_adj_clip_min, self.theta_adj_clip_max)

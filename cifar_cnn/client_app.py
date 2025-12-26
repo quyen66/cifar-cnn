@@ -188,6 +188,7 @@ def client_fn(context: Context) -> Client:
         return client.to_client()
         
     elif attack_type == "backdoor":
+        poison_ratio = float(context.run_config.get("attack-ratio", 0.1))  
         target_label = int(context.run_config.get("backdoor-label", 0))
         pixel_count = int(context.run_config.get("backdoor-pixel-count", 4))
         client = create_attack_client_with_partition_id(
@@ -196,7 +197,7 @@ def client_fn(context: Context) -> Client:
             device=device, local_epochs=local_epochs,
             learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
             proximal_mu=proximal_mu,
-            target_label=target_label, pixel_count=pixel_count
+            target_label=target_label, pixel_count=pixel_count,poison_ratio=poison_ratio
         )
         return client.to_client()
         

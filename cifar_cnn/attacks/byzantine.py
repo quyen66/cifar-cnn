@@ -39,7 +39,7 @@ class ByzantineClient(AttackClient):
             
             # Flip sign: Trừ update thay vì cộng (hoặc nhân -1)
             # Hệ số scale có thể > 1 để tấn công mạnh hơn
-            scale = 1.5 
+            scale = 4.0  # Hệ số tấn công
             w_mal = w_g - (scale * update)
             
             malicious_params.append(w_mal)

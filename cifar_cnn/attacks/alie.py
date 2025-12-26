@@ -14,7 +14,7 @@ class ALIEClient(AttackClient):
     
     def __init__(self, net, trainloader, testloader, device, local_epochs,
                  learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
-                 z=1.5, mode="alie"):
+                 z=3, mode="alie"):
         super().__init__(net, trainloader, testloader, device,
                         local_epochs, learning_rate, use_mixed_precision, proximal_mu)
         self.z = z
