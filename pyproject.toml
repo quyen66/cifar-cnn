@@ -51,7 +51,7 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg2_cluster_emphasis/minsum"
+save-dir = "saved_models/Cfg1_cluster_emphasis/random_noise"
 save-interval = 10
 resume-from = ""
 
@@ -62,7 +62,7 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax"
-attack-type = "minsum" 
+attack-type = "random_noise" 
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
@@ -98,6 +98,26 @@ minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
 # Sau warmup (vòng 11+): Defense kích hoạt, clients mới có Rinit=0.25
 # =====================================================================
 warmup-rounds = 10
+
+# =====================================================================
+# ADAPTIVE REFERENCE
+# =====================================================================
+# Giải quyết FPR cao khi attack corrupt current-round reference
+#
+# Formula: ref = α × historical + (1-α) × current
+#          α = clip(α_base + α_h_mult × H, α_min, α_max)
+#
+# Khi H cao (nhiều attack) → α cao → dùng historical nhiều hơn
+# Khi H thấp (ít attack)   → α thấp → dùng current nhiều hơn
+# =====================================================================
+[tool.flwr.app.config.defense.adaptive-reference]
+
+alpha-base = 0.2           # Base historical weight (khi H=0)
+alpha-h-mult = 0.5         # H multiplier (α tăng khi H tăng)
+alpha-min = 0.1            # Min historical weight (luôn giữ 1 ít historical)
+alpha-max = 0.8            # Max historical weight (không bỏ hết current)
+momentum-decay = 0.9       # EMA decay cho momentum update
+min-history-rounds = 3     # Số round tối thiểu để dùng historical
 
 # =====================================================================
 # LAYER 1: ENHANCED DBSCAN (V2 - 3 trạng thái)
@@ -136,9 +156,9 @@ enable-rescue = true
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.1
-weight-sim = 0.2
-weight-cluster = 0.7
+weight-cv = 0.4
+weight-sim = 0.4
+weight-cluster = 0.2
 
 # θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
 adjustment-factor = 0.3

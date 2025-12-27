@@ -4,6 +4,7 @@ Server Application - Trusted Warm-up & Adaptive Defense (V2 - Soft Pipeline)
 FULL PRODUCTION VERSION with WARMUP BUG FIX:
 - FIX: Warmup trusted client selection bug (seq_id vs partition_id mismatch)
 - Added detailed debug logging
+- Added Adaptive Hybrid Reference
 """
 
 import numpy as np
@@ -40,6 +41,7 @@ from cifar_cnn.defense import (
     Aggregator           
 )
 from cifar_cnn.defense.reputation import ClientStatus 
+from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker  # <<< NEW IMPORT
 
 def weighted_average(metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, Scalar]:
     """Aggregate evaluation metrics."""
@@ -97,10 +99,8 @@ class FullPipelineStrategy(FedProx):
         self.previous_full_grad = None
         self.warmup_client_proxies = None # cố định client proxies trong warmup
         
-        # ===== FIX V2: Pre-init mapping KHÔNG CẦN vì sẽ dùng trực tiếp partition_id =====
         # Mapping sẽ được xây dựng khi cần từ actual client.cid
         print(f"   📋 Trusted Clients Set: {sorted(self.trusted_clients)}")
-        # ===== END FIX =====
         
         if self.enable_defense:
             print("\n" + "="*70)
@@ -141,6 +141,17 @@ class FullPipelineStrategy(FedProx):
         )
         
         self.aggregator = Aggregator(**self.defense_params.get('aggregation', {}))
+        
+        adaptive_ref_params = self.defense_params.get('adaptive_reference', {})
+        self.adaptive_ref_tracker = AdaptiveReferenceTracker(
+            alpha_base=adaptive_ref_params.get('alpha_base', 0.2),
+            alpha_h_mult=adaptive_ref_params.get('alpha_h_mult', 0.5),
+            alpha_min=adaptive_ref_params.get('alpha_min', 0.1),
+            alpha_max=adaptive_ref_params.get('alpha_max', 0.8),
+            momentum_decay=adaptive_ref_params.get('momentum_decay', 0.9),
+            warmup_rounds=self.warmup_rounds,
+            min_history_rounds=adaptive_ref_params.get('min_history_rounds', 3)
+        )
     
     def _identify_malicious_clients(self) -> Set[int]:
         return set()
@@ -317,11 +328,16 @@ class FullPipelineStrategy(FedProx):
             except Exception as e:
                 print(f"   ⚠️ Warning: Momentum update failed in Warmup: {e}")
             
+             # === adaptive reference momentum với clean warmup gradient ===
+            if hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
+                self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
+            
             print(f"   ✅ Warmup aggregation successful with {len(trusted_grads)} trusted clients")
             print(f"   Heterogeneity Score H = 0.000 (Warmup)") 
             self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0)
             if should_save: self._save_checkpoint(server_round)
             return self.current_parameters, {}
+
 
         # ================= PHASE 2: FULL ADAPTIVE DEFENSE =================
         print(f"\n{'='*70}")
@@ -362,9 +378,23 @@ class FullPipelineStrategy(FedProx):
 
         num_mal = sum(gt_malicious_batch)
         print(f"   🔍 [DEBUG] Ground Truth from Metrics: {num_mal} attackers in batch.")
-
-        reference_vector = np.median(np.vstack(full_gradients), axis=0)
-        print("   🛡️  Using Current Round Coordinate Median as Reference")
+        
+        # === Tính H score TRƯỚC để dùng cho adaptive reference ===
+        for local_idx, seq_id in enumerate(seq_cids):
+            self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
+        
+        H_early = self.noniid_handler.compute_heterogeneity_score(full_gradients, seq_cids)
+        
+        # === Tính Adaptive Reference ===
+        if hasattr(self, 'adaptive_ref_tracker'):
+            reference_vector = self.adaptive_ref_tracker.compute_adaptive_reference(
+                full_gradients, 
+                h_score=H_early, 
+                current_round=server_round
+            )
+        else:
+            reference_vector = np.median(np.vstack(full_gradients), axis=0)
+            print("   🛡️  Using Current Round Coordinate Median as Reference")
         
         # 1. Detection Layers
         l1_res = self.layer1_detector.detect(full_gradients, seq_cids, current_round=server_round, is_malicious_ground_truth=gt_malicious_batch)
@@ -382,10 +412,10 @@ class FullPipelineStrategy(FedProx):
         for local_idx, seq_id in enumerate(seq_cids):
             self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
         
-        H = self.noniid_handler.compute_heterogeneity_score(full_gradients, seq_cids)
+        H = H_early  # Sử dụng H đã tính trước đó
         print(f"\n   🌐 Heterogeneity Score H = {H:.4f}")
         
-        # 3. Confidence Scoring - FIX V4: Use correct method calculate_scores
+        # 3. Confidence Scoring - Use correct method calculate_scores
         baseline_deviations = {}
         for i, seq_id in enumerate(seq_cids):
             detail = self.noniid_handler.compute_baseline_deviation_detailed(
@@ -404,7 +434,7 @@ class FullPipelineStrategy(FedProx):
         # 4. Determine client status and update reputation
         client_statuses = {}
         for seq_id in seq_cids:
-            # FIX V4: l1_res returns string, l2_status is REJECTED/ACCEPTED, l2_suspicion is clean/suspicious
+            # l1_res returns string, l2_status is REJECTED/ACCEPTED, l2_suspicion is clean/suspicious
             l1_status = l1_res.get(seq_id, 'ACCEPTED')
             l2_stat = l2_status.get(seq_id, 'ACCEPTED')
             l2_susp = l2_suspicion.get(seq_id, 'clean')
@@ -417,7 +447,7 @@ class FullPipelineStrategy(FedProx):
                 status = ClientStatus.CLEAN
             client_statuses[seq_id] = status
         
-        # Update reputations - FIX V5: Use correct method name and params
+        # Update reputations - Use correct method name and params
         grad_median = np.median(np.vstack(full_gradients), axis=0)
         for local_idx, seq_id in enumerate(seq_cids):
             grad = full_gradients[local_idx]
@@ -432,7 +462,7 @@ class FullPipelineStrategy(FedProx):
                 current_round=server_round
             )
 
-        # 5. Two-Stage Filtering - FIX V5: Use correct method name and params
+        # 5. Two-Stage Filtering - Use correct method name and params
         reputations = {seq_id: self.reputation_system.get_reputation(seq_id) 
                       for seq_id in seq_cids}
         
@@ -460,7 +490,7 @@ class FullPipelineStrategy(FedProx):
         print(f"      Detection Rejected (L1+L2): {len(detection_rejected)}")
         print(f"      Total Filtered: {len(all_filtered)}")
         
-        # 6. Mode Controller Update - FIX V4: Use update_mode with correct signature
+        # 6. Mode Controller Update - Use update_mode with correct signature
         threat_ratio = len(all_filtered) / len(seq_cids) if seq_cids else 0
         new_mode = self.mode_controller.update_mode(
             threat_ratio=threat_ratio,
@@ -501,6 +531,10 @@ class FullPipelineStrategy(FedProx):
                     self.previous_full_grad = agg_grad.flatten()
         except Exception as e:
             print(f"   ⚠️ Warning: Momentum update failed: {e}")
+            
+        # === Update adaptive reference momentum với clean aggregated gradient ===
+        if hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
+            self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
 
         # 8. Metrics Calculation
         self._calculate_metrics(
@@ -537,7 +571,7 @@ class FullPipelineStrategy(FedProx):
             # Lấy phần update tương ứng (Delta W) từ kết quả Aggregation
             update_part = agg_grad[offset:offset+size].reshape(shape)
             
-            # [CHÍNH XÁC] Cộng thẳng Update vào Weight cũ
+            # Cộng thẳng Update vào Weight cũ
             # W_new = W_old + Delta_W_agg
             new_param_val = global_old[i] + update_part
             
@@ -711,6 +745,15 @@ def server_fn(context: Context) -> ServerAppComponents:
             'trim_ratio_max': float(context.run_config.get("defense.aggregation.trim-ratio-max", 0.4)),
             'use_reputation_weights': context.run_config.get("defense.aggregation.use-reputation-weights", True),
             'uniform_weight_fallback': context.run_config.get("defense.aggregation.uniform-weight-fallback", True)
+        }
+        
+        defense_params['adaptive_reference'] = {
+            'alpha_base': float(context.run_config.get("defense.adaptive-reference.alpha-base", 0.2)),
+            'alpha_h_mult': float(context.run_config.get("defense.adaptive-reference.alpha-h-mult", 0.5)),
+            'alpha_min': float(context.run_config.get("defense.adaptive-reference.alpha-min", 0.1)),
+            'alpha_max': float(context.run_config.get("defense.adaptive-reference.alpha-max", 0.8)),
+            'momentum_decay': float(context.run_config.get("defense.adaptive-reference.momentum-decay", 0.9)),
+            'min_history_rounds': int(context.run_config.get("defense.adaptive-reference.min-history-rounds", 3)),
         }
     
     config_metadata = {
