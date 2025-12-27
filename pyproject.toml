@@ -51,7 +51,7 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg1_cluster_emphasis/gaussian_noise"
+save-dir = "saved_models/Cfg2_cluster_emphasis/minsum"
 save-interval = 10
 resume-from = ""
 
@@ -62,14 +62,14 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax"
-attack-type = "gaussian_noise" 
+attack-type = "minsum" 
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
 random-noise-scale = 0.7   # Biên độ nhiễu Uniform [-scale, scale]
 
 # 2. Gaussian Noise
-gaussian-noise-std = 0.3  # Độ lệch chuẩn của nhiễu Gaussian
+gaussian-noise-std = 0.5  # Độ lệch chuẩn của nhiễu Gaussian
 
 # 4. Label Flipping
 flip-probability = 1.0
@@ -79,12 +79,13 @@ flip-type = "reverse"       # "reverse" (0->9) hoặc "random"
 backdoor-label = 0          # Nhãn mục tiêu
 backdoor-pixel-count = 4    # Số lượng pixel trigger
 backdoor-pattern-size = 3   # Kích thước vùng trigger
+backdoor-scaling-factor = 10.0
 
 # 6. ALIE (A Little Is Enough)
-alie-z = 2              # Hệ số z 
+alie-z = 1.5              # Hệ số z 
 
 # 7. Min-Max
-minmax-gamma = 15.0         # Hệ số scale cho Min-Max attack
+minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
 
 # =====================================================================
 # WARMUP PHASE (Vòng 1-10)
@@ -125,6 +126,7 @@ voting-threshold = 3
 distance-multiplier = 1.5
 cosine-threshold = 0.3
 
+enable-rescue = true
 # =====================================================================
 # NON-IID HANDLER
 # =====================================================================
@@ -134,9 +136,9 @@ cosine-threshold = 0.3
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.4
-weight-sim = 0.4
-weight-cluster = 0.2
+weight-cv = 0.1
+weight-sim = 0.2
+weight-cluster = 0.7
 
 # θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
 adjustment-factor = 0.3
@@ -188,8 +190,8 @@ soft-threshold-base = 0.65
 
 # τ_mode - ngưỡng reputation theo mode
 soft-rep-threshold-normal = 0.2
-soft-rep-threshold-alert = 0.4
-soft-rep-threshold-defense = 0.6
+soft-rep-threshold-alert = 0.35
+soft-rep-threshold-defense = 0.5
 
 # =====================================================================
 # REPUTATION SYSTEM 

@@ -20,7 +20,8 @@ from cifar_cnn.attacks import (
     RandomNoiseClient,
     BackdoorClient,
     ALIEClient,
-    MinMaxClient
+    MinMaxClient,
+    MinSumClient
 )
 
 os.environ['PYTHONWARNINGS'] = 'ignore::DeprecationWarning'
@@ -188,28 +189,30 @@ def client_fn(context: Context) -> Client:
         return client.to_client()
         
     elif attack_type == "backdoor":
-        poison_ratio = float(context.run_config.get("attack-ratio", 0.1))  
+        #poison_ratio = float(context.run_config.get("attack-ratio", 0.1))  
         target_label = int(context.run_config.get("backdoor-label", 0))
         pixel_count = int(context.run_config.get("backdoor-pixel-count", 4))
+        scaling_factor = float(context.run_config.get("backdoor-scaling-factor", 10.0))
         client = create_attack_client_with_partition_id(
             BackdoorClient,
             net=net, trainloader=trainloader, testloader=testloader, 
             device=device, local_epochs=local_epochs,
             learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
             proximal_mu=proximal_mu,
-            target_label=target_label, pixel_count=pixel_count,poison_ratio=poison_ratio
+            target_label=target_label, pixel_count=pixel_count,poison_ratio=0.05, scaling_factor=scaling_factor
         )
         return client.to_client()
         
     elif attack_type == "alie":
         z = float(context.run_config.get("alie-z", 1.5))
+        n_clients = int(context.run_config.get("num-clients", 40))
+        n_malicious = int(context.run_config.get("attack-ratio", 0.3)) * n_clients
         client = create_attack_client_with_partition_id(
             ALIEClient,
             net=net, trainloader=trainloader, testloader=testloader, 
             device=device, local_epochs=local_epochs,
             learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
-            proximal_mu=proximal_mu,
-            z=z
+            proximal_mu=proximal_mu, z=z, n_clients=n_clients, n_malicious=n_malicious
         )
         return client.to_client()
         
@@ -221,7 +224,19 @@ def client_fn(context: Context) -> Client:
             device=device, local_epochs=local_epochs,
             learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
             proximal_mu=proximal_mu,
-            gamma=gamma
+            gamma_init=gamma
+        )
+        return client.to_client()
+    
+    elif attack_type == "minsum":
+        gamma = float(context.run_config.get("minmax-gamma", 10.0))
+        client = create_attack_client_with_partition_id(
+            MinSumClient,
+            net=net, trainloader=trainloader, testloader=testloader, 
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
+            proximal_mu=proximal_mu,
+            gamma_init=gamma
         )
         return client.to_client()
     

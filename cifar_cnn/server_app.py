@@ -345,7 +345,6 @@ class FullPipelineStrategy(FedProx):
             
             real_cid_str = c.cid
             
-            # ===== FIX V3: Read partition_id from metrics =====
             partition_id = res.metrics.get("partition_id", None)
             if partition_id is not None:
                 seq_id = int(partition_id)
@@ -355,7 +354,6 @@ class FullPipelineStrategy(FedProx):
                 seq_id = self.client_id_to_sequential.get(c.cid, len(self.client_id_to_sequential))
                 if c.cid not in self.client_id_to_sequential:
                     self.client_id_to_sequential[c.cid] = seq_id
-            # ===== END FIX V3 =====
             
             seq_cids.append(seq_id)
             
@@ -365,12 +363,8 @@ class FullPipelineStrategy(FedProx):
         num_mal = sum(gt_malicious_batch)
         print(f"   🔍 [DEBUG] Ground Truth from Metrics: {num_mal} attackers in batch.")
 
-        if self.previous_full_grad is not None:
-            reference_vector = self.previous_full_grad
-            print("   🛡️  Using Historical Momentum (Full Model) as Reference")
-        else:
-            reference_vector = np.median(np.vstack(full_gradients), axis=0)
-            print("   ℹ️  No History. Fallback to Current Round Median (Full Model).")
+        reference_vector = np.median(np.vstack(full_gradients), axis=0)
+        print("   🛡️  Using Current Round Coordinate Median as Reference")
         
         # 1. Detection Layers
         l1_res = self.layer1_detector.detect(full_gradients, seq_cids, current_round=server_round, is_malicious_ground_truth=gt_malicious_batch)
@@ -655,7 +649,7 @@ def server_fn(context: Context) -> ServerAppComponents:
         defense_params['layer2'] = {
             'distance_multiplier': float(context.run_config.get("defense.layer2.distance-multiplier", 1.5)),
             'cosine_threshold': float(context.run_config.get("defense.layer2.cosine-threshold", 0.3)),
-            #'enable_rescue': context.run_config.get("defense.layer2.enable-rescue", False) 
+            'enable_rescue': context.run_config.get("defense.layer2.enable-rescue", False) 
         }
         defense_params['noniid'] = {
             'weight_cv': float(context.run_config.get("defense.noniid.weight-cv", 0.4)),

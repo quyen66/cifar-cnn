@@ -57,13 +57,15 @@ class Layer2Detector:
     def __init__(
         self,
         distance_multiplier: float = 1.5,
-        cosine_threshold: float = 0.3
+        cosine_threshold: float = 0.3,
+        enable_rescue: bool = False
     ):
         """
         Initialize Layer 2 Detector.
         """
         self.distance_multiplier = distance_multiplier
         self.cosine_threshold = cosine_threshold
+        self.enable_rescue = enable_rescue
         self.last_stats = {}
         
         print(f"✅ Layer2Detector V2 initialized:")
@@ -211,7 +213,7 @@ class Layer2Detector:
         fail_distance: bool
     ) -> Tuple[Layer2Result, Optional[SuspicionLevel]]:
         """
-        Áp dụng ma trận quyết định theo main.pdf.
+        Áp dụng ma trận quyết định
         """
         # REJECTED từ Layer 1 → Giữ nguyên
         if layer1_status == "REJECTED":
@@ -224,8 +226,10 @@ class Layer2Detector:
         
         # Cosine OK, xét theo Layer 1 status
         if layer1_status == "FLAGGED":
-            # L1 đã FLAGGED → dù L2 thấy OK cũng phải SUSPICIOUS
-            return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
+            if self.enable_rescue:
+                return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
+            else:
+                return Layer2Result.REJECTED, None
         
         # L1 ACCEPTED + Cosine OK
         if fail_distance:
