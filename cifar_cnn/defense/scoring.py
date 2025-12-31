@@ -27,7 +27,8 @@ class ConfidenceScorer:
         baseline_suspicious_threshold: float = 0.3,
         baseline_factor_suspicious: float = 0.8,
         rescued_penalty: float = 0.3,
-        rescued_suspicious_penalty: float = 0.7
+        rescued_suspicious_penalty: float = 0.7,
+        rescued_euclidean: float = 0.5,
     ):
         self.w_flag = weight_flagged
         self.w_euc = weight_euclidean
@@ -36,6 +37,7 @@ class ConfidenceScorer:
         self.factor_suspicious = baseline_factor_suspicious
         self.rescued_penalty = rescued_penalty
         self.rescued_suspicious_penalty = rescued_suspicious_penalty
+        self.rescued_euclidean = rescued_euclidean
         
         print(f"✅ ConfidenceScorer Initialized:")
         print(f"   Weights: Flag={self.w_flag}, Euc={self.w_euc}, Base={self.w_base}")
@@ -57,12 +59,19 @@ class ConfidenceScorer:
             # 1. Indicator Flagged (Lớp 1)
             l1_status = layer1_results.get(cid, "ACCEPTED")
             l2_status = layer2_status.get(cid, "ACCEPTED")
+            
+            if l1_status == "REJECTED" or l2_status == "REJECTED":
+                scores[cid] = 1.0
+                print(f"         Client {cid}: ci=1.000 (FORCED REJECT - {l1_status}/{l2_status})")
+                continue
+            
             delta = baseline_deviations.get(cid, 0.0)
             suspicion = suspicion_levels.get(cid, "clean")
 
             if l1_status == "REJECTED":
                 # Layer 1 hard reject → always flagged
                 I_flagged = 1.0
+                I_euclidean = 1.0
             elif l1_status == "FLAGGED":
                 if l2_status == "ACCEPTED":
                     # Layer 2 rescued → NOT flagged anymore!
@@ -77,15 +86,17 @@ class ConfidenceScorer:
                 # Layer 1 accepted → not flagged
                 I_flagged = 0.0
 
+
             # 2. Indicator Fail Euclidean (Lớp 2)
-            # Nếu status là SUSPICIOUS -> có nghĩa là fail Euclidean hoặc L1 Flagged
-            # Để tách biệt fail Euclidean, ta cần check logic:
-            # Trong Layer 2: Suspicious = (L1 Flagged) OR (Fail Distance)
-            # Ở đây ta xấp xỉ: Nếu L2 Suspicious -> coi như có dấu hiệu bất thường
-            # Tuy nhiên, để chính xác theo công thức, tốt nhất truyền thẳng kết quả check distance vào.
-            # *Tạm thời dùng logic*: Nếu Suspicious -> tính là 1 phần rủi ro
-            I_euclidean = 1.0 if suspicion == "suspicious" else 0.0
             
+            if l2_status == "REJECTED":
+                I_euclidean = 1.0  # Failed L2 checks!
+            elif suspicion == "suspicious":
+                I_euclidean = self.rescued_euclidean  # Passed but with suspicion
+            else:
+                I_euclidean = 0.0  # Clean
+                
+                 
             # Baseline deviation factor
             if delta > self.delta_threshold:
                 delta_factor = delta * self.factor_suspicious

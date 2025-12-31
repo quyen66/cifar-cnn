@@ -21,7 +21,9 @@ from cifar_cnn.attacks import (
     BackdoorClient,
     ALIEClient,
     MinMaxClient,
-    MinSumClient
+    MinSumClient,
+    OnOffAttackClient,
+    SlowPoisoningClient,
 )
 
 os.environ['PYTHONWARNINGS'] = 'ignore::DeprecationWarning'
@@ -248,6 +250,44 @@ def client_fn(context: Context) -> Client:
             learning_rate=learning_rate, use_mixed_precision=use_mixed_precision, 
             proximal_mu=proximal_mu,
             mode="sign_flip"
+        )
+        return client.to_client()
+    
+    elif attack_type == "on_off":
+        # On-Off Attack: Tấn công không liên tục
+        # Highlight: Reputation EMA, Lambda Penalty, Soft Filter
+        frequency = int(context.run_config.get("onoff-frequency", 5))
+        onoff_type = context.run_config.get("onoff-attack", "sign_flip")
+        onoff_scale = float(context.run_config.get("onoff-attack-scale", 2.0))
+        
+        client = create_attack_client_with_partition_id(
+            OnOffAttackClient,
+            net=net, trainloader=trainloader, testloader=testloader,
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision,
+            proximal_mu=proximal_mu,
+            attack_frequency=frequency,
+            attack_type=onoff_type,
+            attack_scale=onoff_scale
+        )
+        return client.to_client()
+    
+    elif attack_type == "slow_poison":
+        # Slow Poisoning: Tấn công từ từ
+        # Highlight: Baseline Tracking, Confidence Scoring, Hard Filter, Non-IID Handler
+        poison_rate = float(context.run_config.get("slow-poison-rate", 0.1))
+        poison_direction = context.run_config.get("slow-poison-direction", "negative")
+        warmup = int(context.run_config.get("slow-poison-warmup", 0))
+        
+        client = create_attack_client_with_partition_id(
+            SlowPoisoningClient,
+            net=net, trainloader=trainloader, testloader=testloader,
+            device=device, local_epochs=local_epochs,
+            learning_rate=learning_rate, use_mixed_precision=use_mixed_precision,
+            proximal_mu=proximal_mu,
+            poison_rate=poison_rate,
+            poison_direction=poison_direction,
+            warmup_rounds=warmup
         )
         return client.to_client()
         

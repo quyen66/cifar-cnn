@@ -58,7 +58,9 @@ class Layer2Detector:
         self,
         distance_multiplier: float = 1.5,
         cosine_threshold: float = 0.3,
-        enable_rescue: bool = False
+        enable_rescue: bool = False,
+        rescue_cosine_threshold: float = 0.7,  # Ngưỡng cosine để rescue (cao hơn reject)
+        require_distance_pass_for_rescue: bool = True,  # Phải pass distance để rescue
     ):
         """
         Initialize Layer 2 Detector.
@@ -66,11 +68,17 @@ class Layer2Detector:
         self.distance_multiplier = distance_multiplier
         self.cosine_threshold = cosine_threshold
         self.enable_rescue = enable_rescue
+        self.rescue_cosine_threshold = rescue_cosine_threshold
+        self.require_distance_pass_for_rescue = require_distance_pass_for_rescue
         self.last_stats = {}
         
         print(f"✅ Layer2Detector V2 initialized:")
         print(f"   Distance multiplier: {distance_multiplier}")
-        print(f"   Cosine threshold: {cosine_threshold}")
+        print(f"   Cosine threshold (reject): {cosine_threshold}")
+        print(f"   Enable rescue: {enable_rescue}")
+        if enable_rescue:
+            print(f"   Rescue cosine threshold: {rescue_cosine_threshold}")
+            print(f"   Require distance pass: {require_distance_pass_for_rescue}")
 
     def detect(
         self,
@@ -114,6 +122,12 @@ class Layer2Detector:
         median_distance = np.median(distances)
         distance_threshold = self.distance_multiplier * median_distance
         
+        self._log_per_client_metrics(
+                client_ids, distances, cosines, 
+                layer1_results, is_malicious_ground_truth,
+                distance_threshold, current_round
+            )
+        
         # =========================================================
         # STEP 2: Áp dụng ma trận quyết định
         # =========================================================
@@ -137,9 +151,15 @@ class Layer2Detector:
             fail_distance = dist > distance_threshold
             fail_cosine = cos <= self.cosine_threshold
             
+            # Check rescue condition
+            can_rescue = (
+                cos > self.rescue_cosine_threshold and 
+                (not self.require_distance_pass_for_rescue or not fail_distance)
+            )
+
             # Áp dụng ma trận quyết định
             result, suspicion = self._apply_decision_matrix(
-                layer1_status, fail_cosine, fail_distance
+                layer1_status, fail_cosine, fail_distance, can_rescue
             )
             
             final_status[cid] = result.value
@@ -153,6 +173,7 @@ class Layer2Detector:
                 "fail_distance": fail_distance,
                 "fail_cosine": fail_cosine,
                 "final": result.value,
+                "can_rescue": can_rescue,
                 "suspicion": suspicion.value if suspicion else None
             })
         
@@ -165,6 +186,99 @@ class Layer2Detector:
         )
         
         return final_status, suspicion_levels
+
+    def _log_per_client_metrics(
+        self,
+        client_ids: List[int],
+        distances: np.ndarray,
+        cosines: np.ndarray,
+        layer1_results: Dict[int, str],
+        ground_truth: Optional[List[bool]],
+        distance_threshold: float,
+        current_round: int
+    ):
+        """
+        Log chi tiết cosine và distance cho từng client.
+        """
+        print(f"\n{'─'*70}")
+        print(f"📐 Layer 2 Per-Client Metrics - Round {current_round}")
+        print(f"{'─'*70}")
+        print(f"   Distance threshold: {distance_threshold:.2f}")
+        print(f"   Cosine reject threshold: {self.cosine_threshold}")
+        print(f"   Cosine rescue threshold: {self.rescue_cosine_threshold}")
+        print(f"{'─'*70}")
+        
+        # Header
+        if ground_truth:
+            print(f"   {'ID':>4} | {'L1 Status':>10} | {'Cosine':>8} | {'Distance':>10} | {'Dist OK':>8} | {'Cos OK':>7} | {'Rescue?':>7} | {'GT':>5}")
+            print(f"   {'-'*4}-+-{'-'*10}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}-+-{'-'*7}-+-{'-'*7}-+-{'-'*5}")
+        else:
+            print(f"   {'ID':>4} | {'L1 Status':>10} | {'Cosine':>8} | {'Distance':>10} | {'Dist OK':>8} | {'Cos OK':>7} | {'Rescue?':>7}")
+            print(f"   {'-'*4}-+-{'-'*10}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}-+-{'-'*7}-+-{'-'*7}")
+        
+        # Sort by L1 status (FLAGGED first) then by cosine
+        sorted_indices = sorted(
+            range(len(client_ids)),
+            key=lambda i: (
+                0 if layer1_results.get(client_ids[i]) == "FLAGGED" else 1,
+                -cosines[i]  # Higher cosine first
+            )
+        )
+        
+        for i in sorted_indices:
+            cid = client_ids[i]
+            l1_status = layer1_results.get(cid, "ACCEPTED")
+            cos = cosines[i]
+            dist = distances[i]
+            
+            dist_ok = "✓" if dist <= distance_threshold else "✗"
+            cos_ok = "✓" if cos > self.cosine_threshold else "✗"
+            
+            # Check rescue eligibility
+            can_rescue = (
+                cos > self.rescue_cosine_threshold and 
+                (not self.require_distance_pass_for_rescue or dist <= distance_threshold)
+            )
+            rescue_status = "✓" if can_rescue else "✗"
+            
+            # Color coding for cosine
+            if cos > self.rescue_cosine_threshold:
+                cos_indicator = "🟢"  # Good - can rescue
+            elif cos > self.cosine_threshold:
+                cos_indicator = "🟡"  # Medium - pass but can't rescue
+            else:
+                cos_indicator = "🔴"  # Bad - will reject
+            
+            if ground_truth:
+                gt_label = "MAL" if ground_truth[i] else "BEN"
+                gt_emoji = "⚠️" if ground_truth[i] else "✅"
+                print(f"   {cid:>4} | {l1_status:>10} | {cos_indicator}{cos:>6.3f} | {dist:>10.2f} | {dist_ok:>8} | {cos_ok:>7} | {rescue_status:>7} | {gt_emoji}{gt_label}")
+            else:
+                print(f"   {cid:>4} | {l1_status:>10} | {cos_indicator}{cos:>6.3f} | {dist:>10.2f} | {dist_ok:>8} | {cos_ok:>7} | {rescue_status:>7}")
+        
+        print(f"{'─'*70}")
+        
+        # Summary statistics
+        flagged_ids = [i for i, cid in enumerate(client_ids) if layer1_results.get(cid) == "FLAGGED"]
+        if flagged_ids:
+            flagged_cosines = cosines[flagged_ids]
+            print(f"   📊 FLAGGED clients cosine stats:")
+            print(f"      Min: {np.min(flagged_cosines):.3f}, Max: {np.max(flagged_cosines):.3f}, Mean: {np.mean(flagged_cosines):.3f}")
+            
+            eligible_rescue = sum(1 for i in flagged_ids if cosines[i] > self.rescue_cosine_threshold)
+            print(f"      Eligible for rescue (cos > {self.rescue_cosine_threshold}): {eligible_rescue}/{len(flagged_ids)}")
+            
+            if ground_truth:
+                flagged_malicious = sum(1 for i in flagged_ids if ground_truth[i])
+                flagged_benign = len(flagged_ids) - flagged_malicious
+                print(f"      Ground truth: {flagged_malicious} malicious, {flagged_benign} benign")
+                
+                # Analyze which would be rescued
+                rescue_eligible_mal = sum(1 for i in flagged_ids if ground_truth[i] and cosines[i] > self.rescue_cosine_threshold)
+                rescue_eligible_ben = sum(1 for i in flagged_ids if not ground_truth[i] and cosines[i] > self.rescue_cosine_threshold)
+                print(f"      Would rescue: {rescue_eligible_ben} benign (correct), {rescue_eligible_mal} malicious (wrong)")
+        
+        print(f"{'─'*70}\n")
 
     def _compute_metrics(
         self, 
@@ -210,7 +324,8 @@ class Layer2Detector:
         self,
         layer1_status: str,
         fail_cosine: bool,
-        fail_distance: bool
+        fail_distance: bool,
+        can_rescue: bool
     ) -> Tuple[Layer2Result, Optional[SuspicionLevel]]:
         """
         Áp dụng ma trận quyết định
@@ -226,7 +341,7 @@ class Layer2Detector:
         
         # Cosine OK, xét theo Layer 1 status
         if layer1_status == "FLAGGED":
-            if self.enable_rescue:
+            if self.enable_rescue and can_rescue:
                 return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
             else:
                 return Layer2Result.REJECTED, None
@@ -265,8 +380,10 @@ class Layer2Detector:
             if layer1_results.get(cid) == "FLAGGED" and final_status.get(cid) == "REJECTED"
         )
         
+        flagged_count = sum(1 for cid in client_ids if layer1_results.get(cid) == "FLAGGED")
+        
         print(f"\n{'='*60}")
-        print(f"📊 Layer 2 Results - Round {current_round}")
+        print(f"📊 Layer 2 Summary - Round {current_round}")
         print(f"{'='*60}")
         print(f"   Final Status:")
         print(f"      REJECTED: {rejected_count}")
@@ -275,8 +392,13 @@ class Layer2Detector:
         print(f"      Clean: {clean_count}")
         print(f"      Suspicious: {suspicious_count}")
         print(f"   Layer 1 → Layer 2 Changes:")
+        print(f"      FLAGGED from L1: {flagged_count}")
         print(f"      Rescued (FLAGGED→ACCEPTED): {rescued}")
         print(f"      Confirmed (FLAGGED→REJECTED): {confirmed}")
+        
+        if self.enable_rescue:
+            rescue_rate = rescued / flagged_count if flagged_count > 0 else 0
+            print(f"      Rescue Rate: {rescue_rate:.1%} ({rescued}/{flagged_count})")
         
         if ground_truth:
             actual_malicious = [i for i, m in enumerate(ground_truth) if m]
@@ -285,6 +407,7 @@ class Layer2Detector:
             
             tp = len(set(actual_malicious) & set(detected))
             fp = len(set(detected) - set(actual_malicious))
+            fn = len(set(actual_malicious) - set(detected))
             
             detection_rate = tp / len(actual_malicious) if actual_malicious else 0
             benign_count = len(ground_truth) - len(actual_malicious)
@@ -293,6 +416,20 @@ class Layer2Detector:
             print(f"\n   📈 Final Metrics (after Layer 2):")
             print(f"      Detection Rate: {detection_rate:.1%} ({tp}/{len(actual_malicious)})")
             print(f"      False Positive Rate: {fpr:.1%} ({fp}/{benign_count})")
+            print(f"      Missed (FN): {fn}")
+            
+            if rescued > 0:
+                rescued_clients = [
+                    cid for cid in client_ids 
+                    if layer1_results.get(cid) == "FLAGGED" and final_status.get(cid) == "ACCEPTED"
+                ]
+                rescued_indices = [client_ids.index(cid) for cid in rescued_clients]
+                rescued_malicious = sum(1 for idx in rescued_indices if ground_truth[idx])
+                rescued_benign = rescued - rescued_malicious
+                
+                print(f"      🔍 Rescue Analysis:")
+                print(f"         Rescued benign (correct): {rescued_benign}")
+                print(f"         Rescued malicious (wrong): {rescued_malicious}")
         
         print(f"{'='*60}\n")
 

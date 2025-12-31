@@ -13,7 +13,7 @@ import os
 import torch
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Set
-
+import random
 from flwr.common import (
     FitRes,
     Parameters,
@@ -41,7 +41,7 @@ from cifar_cnn.defense import (
     Aggregator           
 )
 from cifar_cnn.defense.reputation import ClientStatus 
-from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker  # <<< NEW IMPORT
+from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker 
 
 def weighted_average(metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, Scalar]:
     """Aggregate evaluation metrics."""
@@ -116,7 +116,8 @@ class FullPipelineStrategy(FedProx):
         self.noniid_handler = NonIIDHandler(**self.defense_params.get('noniid', {}))
         self.confidence_scorer = ConfidenceScorer(**self.defense_params.get('confidence', {}), 
                                                   rescued_penalty=self.defense_params.get('confidence', {}).get('rescued_penalty', 0.3),
-                                                  rescued_suspicious_penalty=self.defense_params.get('confidence', {}).get('rescued-suspicious-penalty', 0.7))
+                                                  rescued_suspicious_penalty=self.defense_params.get('confidence', {}).get('rescued-suspicious-penalty', 0.7),
+                                                  rescued_euclidean=self.defense_params.get('confidence', {}).get('rescued-euclidean', 0.5))
         self.two_stage_filter = TwoStageFilter(**self.defense_params.get('filtering', {}))
         self.mode_controller = ModeController(**self.defense_params.get('mode', {}))
         
@@ -152,6 +153,7 @@ class FullPipelineStrategy(FedProx):
             warmup_rounds=self.warmup_rounds,
             min_history_rounds=adaptive_ref_params.get('min_history_rounds', 3)
         )
+
     
     def _identify_malicious_clients(self) -> Set[int]:
         return set()
@@ -191,10 +193,13 @@ class FullPipelineStrategy(FedProx):
             if not all_real_cids:
                 return [] 
             
-            config = {}
+            config = {"server_round": server_round}
             if self.on_fit_config_fn is not None:
-                config = self.on_fit_config_fn(server_round)
+                extra = self.on_fit_config_fn(server_round)
+                if extra: config.update(extra)
+
             fit_ins = FitIns(parameters, config)
+
 
             if server_round == 1:
                 # Round 1: Gửi đến TẤT CẢ clients để lấy mapping cid → partition_id
@@ -221,7 +226,20 @@ class FullPipelineStrategy(FedProx):
             
             return target_clients
 
-        return super().configure_fit(server_round, parameters, client_manager)
+        all_clients_dict = client_manager.all()
+        all_cids = sorted(list(all_clients_dict.keys()), key=lambda x: int(x))
+        num_sample = max(int(len(all_cids) * self.fraction_fit), self.min_fit_clients)
+        num_sample = min(num_sample, len(all_cids))
+        sampled_cids = random.sample(all_cids, num_sample)
+
+        config = {"server_round": server_round}
+        if self.on_fit_config_fn is not None:
+            extra = self.on_fit_config_fn(server_round)
+            if extra: config.update(extra)
+
+        fit_ins = FitIns(parameters, config)
+        return [(all_clients_dict[cid], fit_ins) for cid in sampled_cids]
+
 
     def aggregate_fit(
         self,
@@ -447,6 +465,8 @@ class FullPipelineStrategy(FedProx):
                 status = ClientStatus.CLEAN
             client_statuses[seq_id] = status
         
+        old_reps = {seq_id: self.reputation_system.get_reputation(seq_id) for seq_id in seq_cids}
+        
         # Update reputations - Use correct method name and params
         grad_median = np.median(np.vstack(full_gradients), axis=0)
         for local_idx, seq_id in enumerate(seq_cids):
@@ -465,6 +485,74 @@ class FullPipelineStrategy(FedProx):
         # 5. Two-Stage Filtering - Use correct method name and params
         reputations = {seq_id: self.reputation_system.get_reputation(seq_id) 
                       for seq_id in seq_cids}
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # 📊 REPUTATION TABLE - Hiển thị R của từng client + tăng/giảm
+        # ═══════════════════════════════════════════════════════════════════
+        print(f"\n{'─'*82}")
+        print(f"📊 REPUTATION CHANGES - Round {server_round}")
+        print(f"{'─'*82}")
+        print(f"  {'ID':>3} │ {'GT':^5} │ {'Status':^10} │ {'Old R':>8} │ {'New R':>8} │ {'Δ':>9} │ Note")
+        print(f"  {'─'*3}─┼─{'─'*5}─┼─{'─'*10}─┼─{'─'*8}─┼─{'─'*8}─┼─{'─'*9}─┼─{'─'*12}")
+        
+        # Tính changes và sort (drops lớn nhất trước)
+        rep_changes = []
+        for seq_id in seq_cids:
+            old_r = old_reps[seq_id]
+            new_r = reputations[seq_id]
+            delta = new_r - old_r
+            rep_changes.append((seq_id, old_r, new_r, delta))
+        rep_changes.sort(key=lambda x: x[3])  # Sort by delta (drops first)
+        
+        for seq_id, old_r, new_r, delta in rep_changes:
+            # Ground truth
+            idx = seq_cids.index(seq_id)
+            is_mal = gt_malicious_batch[idx] if idx < len(gt_malicious_batch) else False
+            gt_str = "⚠️MAL" if is_mal else "✅BEN"
+            
+            # Status
+            st = client_statuses.get(seq_id, ClientStatus.CLEAN)
+            st_str = "REJECTED" if st == ClientStatus.REJECTED else ("SUSPICIOUS" if st == ClientStatus.SUSPICIOUS else "CLEAN")
+            
+            # Change indicator
+            if delta > 0.01:
+                d_str = f"↑ +{delta:.4f}"
+                note = ""
+            elif delta < -0.01:
+                d_str = f"↓ {delta:.4f}"
+                note = ""
+            else:
+                d_str = f"  ={delta:+.4f}"
+                note = ""
+            
+            # Highlight anomalies
+            if not is_mal and delta < -0.05:
+                note = "⚠️BEN R↓↓"   # Benign mất nhiều R
+            elif is_mal and delta > 0.05:
+                note = "⚠️MAL R↑↑"   # Malicious được tăng R
+            elif is_mal and new_r > 0.7:
+                note = "⚠️MAL HIGH"  # Malicious có R cao
+            elif not is_mal and new_r < 0.3:
+                note = "⚠️BEN LOW"   # Benign có R thấp
+                
+            print(f"  {seq_id:>3} │ {gt_str:^5} │ {st_str:^10} │ {old_r:>8.4f} │ {new_r:>8.4f} │ {d_str:>9} │ {note}")
+        
+        print(f"  {'─'*82}")
+        
+        # Summary
+        mal_r = [reputations[seq_cids[i]] for i, m in enumerate(gt_malicious_batch) if m]
+        ben_r = [reputations[seq_cids[i]] for i, m in enumerate(gt_malicious_batch) if not m]
+        if mal_r:
+            print(f"  📌 Malicious: avg={np.mean(mal_r):.4f}, min={min(mal_r):.4f}, max={max(mal_r):.4f}")
+        if ben_r:
+            print(f"  📌 Benign:    avg={np.mean(ben_r):.4f}, min={min(ben_r):.4f}, max={max(ben_r):.4f}")
+        
+        # Cảnh báo nếu benign bị giảm R nhiều
+        bad_ben = sum(1 for i, seq_id in enumerate(seq_cids) 
+                      if not gt_malicious_batch[i] and reputations[seq_id] - old_reps[seq_id] < -0.05)
+        if bad_ben > 0:
+            print(f"  ⚠️ WARNING: {bad_ben} benign clients lost >5% reputation!")
+        print(f"{'─'*82}\n")
         
         current_mode = self.mode_controller.get_current_mode()
         
@@ -582,6 +670,13 @@ class FullPipelineStrategy(FedProx):
         self.current_parameters = ndarrays_to_parameters(new_params)
         
     def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, threat_ratio, elapsed):
+        """
+        Calculate and print detection metrics.
+        
+        Output includes:
+        - Human-readable metrics (Precision, Recall, F1, FPR as percentages)
+        - Machine-parseable summary line for automation scripts
+        """
         if not seq_cids:
             print(f"\n📊 METRICS ROUND {server_round}")
             print(f"   (Warmup - No detection metrics)")
@@ -605,20 +700,24 @@ class FullPipelineStrategy(FedProx):
         self.total_tp += tp
         self.total_fp += fp
         
+        # Calculate all metrics
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+        detection_rate = recall  # Detection Rate = Recall = TP / (TP + FN)
+        
+        # Human-readable output
         print(f"\n📊 METRICS ROUND {server_round}")
         print(f"   TP={tp}, FP={fp}, FN={fn}, TN={tn}")
+        print(f"   Detection Rate: {detection_rate:.2%}")
+        print(f"   Precision: {precision:.2%}")
+        print(f"   Recall: {recall:.2%}")
+        print(f"   F1 Score: {f1:.2%}")
+        print(f"   False Positive Rate: {fpr:.2%}")
         
-        if tp + fn > 0:
-            detection_rate = tp / (tp + fn)
-            print(f"   Detection Rate: {detection_rate:.2%}")
-        
-        if tp + fp > 0:
-            precision = tp / (tp + fp)
-            print(f"   Precision: {precision:.2%}")
-            
-        if fp + tn > 0:
-            fpr = fp / (fp + tn)
-            print(f"   False Positive Rate: {fpr:.2%}")
+        # 🆕 Machine-parseable summary line (for run_param_tests.py)
+        print(f"   [METRICS] Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}, FPR={fpr:.4f}")
         
         print(f"   H={H:.4f}, Threat Ratio={threat_ratio:.2%}")
         print(f"   Time: {elapsed:.2f}s")
@@ -679,11 +778,14 @@ def server_fn(context: Context) -> ServerAppComponents:
             'dbscan_eps_multiplier': float(context.run_config.get("defense.layer1.dbscan-eps-multiplier", 0.5)),
             'mad_k_reject': float(context.run_config.get("defense.layer1.mad-k-reject", 15.0)),
             'mad_k_flag': float(context.run_config.get("defense.layer1.mad-k-flag", 4.0)),
+            'zero_cluster_action': context.run_config.get("defense.layer1.zero-cluster-action", "accept_all"),
         }
         defense_params['layer2'] = {
             'distance_multiplier': float(context.run_config.get("defense.layer2.distance-multiplier", 1.5)),
             'cosine_threshold': float(context.run_config.get("defense.layer2.cosine-threshold", 0.3)),
-            'enable_rescue': context.run_config.get("defense.layer2.enable-rescue", False) 
+            'enable_rescue': context.run_config.get("defense.layer2.enable-rescue", False),
+            'rescue_cosine_threshold': float(context.run_config.get("defense.layer2.rescue-cosine-threshold", 0.7)),
+            'require_distance_pass_for_rescue': context.run_config.get("defense.layer2.require-distance-pass", True)
         }
         defense_params['noniid'] = {
             'weight_cv': float(context.run_config.get("defense.noniid.weight-cv", 0.4)),

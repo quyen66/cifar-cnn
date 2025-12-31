@@ -1,6 +1,6 @@
 """
-Layer 1: Enhanced DBSCAN Detection (V2 - main.pdf)
-====================================================
+Layer 1: Enhanced DBSCAN Detection (V2.1 - main.pdf + Zero Cluster Fix)
+========================================================================
 Giai đoạn 2: Hai lớp phát hiện tuần tự
 
 Pipeline:
@@ -13,6 +13,10 @@ Pipeline:
    - PCA giảm chiều: dpca = min(20, floor(0.5×n_remaining))
    - DBSCAN: ε = 0.5×median_dist, minPts = 3
    - Outliers (label=-1) → FLAGGED
+   
+   🆕 V2.1 FIX: Khi cluster_count = 0:
+   - Tất cả clients tương tự nhau → ACCEPT ALL (không flag ai)
+   - Lý do: Nếu không tìm được cluster nào, nghĩa là clients đồng nhất
 
 Output: Dict[client_id, status] với status ∈ {"REJECTED", "FLAGGED", "ACCEPTED"}
 
@@ -27,6 +31,8 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
 
+from collections import deque
+from dataclasses import dataclass, field
 
 class Layer1Status(Enum):
     """Trạng thái của client sau Layer 1."""
@@ -48,12 +54,17 @@ class Layer1Result:
 
 class Layer1Detector:
     """
-    Layer 1 Detector với 3 trạng thái (V2 - main.pdf).
+    Layer 1 Detector với 3 trạng thái (V2.1 - main.pdf + Zero Cluster Fix).
     
     Đặc điểm:
     - Magnitude Filter bảo vệ PCA khỏi outliers cực đoan
     - DBSCAN chỉ chạy trên clients không bị REJECTED (tiết kiệm tài nguyên)
     - PCA dims động theo số clients còn lại
+    
+    🆕 V2.1: Xử lý cluster_count = 0
+    - Khi DBSCAN không tìm thấy cluster nào → tất cả clients tương tự
+    - zero_cluster_action = "accept_all": Không flag ai (mặc định)
+    - zero_cluster_action = "flag_all": Flag tất cả (behavior cũ)
     """
     
     def __init__(
@@ -63,7 +74,9 @@ class Layer1Detector:
         dbscan_eps_multiplier: float = 0.5,
         mad_k_reject: float = 15.0,
         mad_k_flag: float = 4.0,
-        voting_threshold: int = 2
+        voting_threshold: int = 2,
+        # Zero Cluster Handling ===
+        zero_cluster_action: str = "accept_all"  # "accept_all" hoặc "flag_all"
     ):
         """
         Initialize Layer 1 Detector.
@@ -75,20 +88,26 @@ class Layer1Detector:
             mad_k_reject: k for REJECTED threshold (default=15)
             mad_k_flag: k for FLAGGED threshold (default=4)
             voting_threshold: Unused, kept for compatibility
+            
+            🆕 zero_cluster_action: Hành động khi DBSCAN tìm thấy 0 clusters
+                - "accept_all": Không flag ai (clients tương tự = benign)
+                - "flag_all": Flag tất cả (behavior cũ)
         """
         self.target_pca_dims = pca_dims
         self.min_samples = dbscan_min_samples
         self.eps_multiplier = dbscan_eps_multiplier
         self.mad_k_reject = mad_k_reject
         self.mad_k_flag = mad_k_flag
+        self.zero_cluster_action = zero_cluster_action
         
         # Stats
         self.last_result: Optional[Layer1Result] = None
         
-        print(f"✅ Layer1Detector V2 initialized:")
+        print(f"✅ Layer1Detector initialized (Zero Cluster Fix):")
         print(f"   Magnitude: k_reject={mad_k_reject}, k_flag={mad_k_flag}")
         print(f"   DBSCAN: minPts={dbscan_min_samples}, eps_mult={dbscan_eps_multiplier}")
         print(f"   PCA dims (target): {pca_dims}")
+        print(f"   🆕 Zero cluster action: {zero_cluster_action}")
 
     def detect(
         self,
@@ -204,27 +223,23 @@ class Layer1Detector:
         
         Theo PDF:
         - τ(k) = Median(||gj||) + k × MAD
-        - REJECTED: ||gi|| > τ(15)
-        - FLAGGED: ||gi|| > τ(4)
-        - ACCEPTED: ||gi|| ≤ τ(4)
-        
-        Returns:
-            status: List[Layer1Status]
-            stats: Dict với thông tin debug
+        - REJECTED: ||gi|| > τ(k_reject)
+        - FLAGGED: ||gi|| > τ(k_flag)
+        - ACCEPTED: otherwise
         """
-        # Tính norms
+        # Tính norm của từng gradient
         norms = np.array([np.linalg.norm(g) for g in gradients])
         
         # Tính Median và MAD
         median_norm = np.median(norms)
         mad = np.median(np.abs(norms - median_norm))
         
-        # Tránh MAD = 0 (tất cả gradient giống nhau)
-        effective_mad = mad if mad > 1e-9 else 1.0
+        # Tránh MAD = 0 (khi tất cả norms giống nhau)
+        effective_mad = max(mad, 1e-6)
         
         # Tính ngưỡng
-        threshold_reject = median_norm + self.mad_k_reject * effective_mad  # k=15
-        threshold_flag = median_norm + self.mad_k_flag * effective_mad      # k=4
+        threshold_reject = median_norm + self.mad_k_reject * effective_mad
+        threshold_flag = median_norm + self.mad_k_flag * effective_mad
         
         # Phân loại
         status = []
@@ -270,6 +285,11 @@ class Layer1Detector:
         - minPts = 3
         - Outliers (label=-1) → FLAGGED
         
+        🆕 V2.1: Xử lý cluster_count = 0
+        - Khi không tìm thấy cluster → clients tương tự nhau
+        - zero_cluster_action = "accept_all": Không flag ai
+        - zero_cluster_action = "flag_all": Flag tất cả (behavior cũ)
+        
         Returns:
             flags: List[bool] - True nếu là outlier (cần FLAGGED)
             stats: Dict với thông tin debug
@@ -287,7 +307,9 @@ class Layer1Detector:
             "eps": 0,
             "min_samples": self.min_samples,
             "outlier_count": 0,
-            "cluster_count": 0
+            "cluster_count": 0,
+            "zero_cluster_action": None,
+            "zero_cluster_triggered": False
         }
         
         if actual_pca_dims < 2 or num_clients < self.min_samples:
@@ -324,12 +346,29 @@ class Layer1Detector:
             )
             labels = clustering.fit_predict(reduced)
             
-            # Outliers (label=-1) → cần FLAGGED
-            flags = [label == -1 for label in labels]
-            
             # Count clusters (không kể noise)
             unique_labels = set(labels)
             cluster_count = len([l for l in unique_labels if l != -1])
+            
+            # =========================================================
+            # XỬ LÝ CLUSTER_COUNT = 0
+            # =========================================================
+            if cluster_count == 0:
+                stats["zero_cluster_triggered"] = True
+                stats["zero_cluster_action"] = self.zero_cluster_action
+                
+                if self.zero_cluster_action == "accept_all":
+                    # Tất cả clients tương tự → ACCEPT ALL (không flag ai)
+                    flags = [False] * num_clients
+                    print(f"      ⚠️ DBSCAN: 0 clusters found → ACCEPT ALL (clients are similar)")
+                else:
+                    # Behavior cũ: Flag tất cả
+                    flags = [True] * num_clients
+                    print(f"      ⚠️ DBSCAN: 0 clusters found → FLAG ALL (legacy behavior)")
+            else:
+                # Có cluster → Outliers (label=-1) cần FLAGGED
+                flags = [label == -1 for label in labels]
+            # =========================================================
             
             # Update stats
             stats["eps"] = float(eps)
@@ -387,6 +426,9 @@ class Layer1Detector:
             print(f"   eps: {db.get('eps', 0):.4f} (median_dist={db.get('median_dist', 0):.4f})")
             print(f"   Clusters found: {db.get('cluster_count', 0)}")
             print(f"   Outliers (→FLAGGED): {db.get('outlier_count', 0)}")
+            
+            if db.get('zero_cluster_triggered'):
+                print(f"   🆕 Zero cluster triggered: action={db.get('zero_cluster_action')}")
         
         # Final counts
         print(f"\n📋 Final Status:")
@@ -432,3 +474,4 @@ class Layer1Detector:
             "flagged_count": len(self.last_result.flagged_ids),
             "accepted_count": len(self.last_result.accepted_ids)
         }
+        
