@@ -51,7 +51,7 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg2_cluster_emphasis/none"
+save-dir = "saved_models/Cfg1_cluster_emphasis/backdoor"
 save-interval = 10
 resume-from = ""
 
@@ -62,8 +62,8 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "none" 
-attack-ratio = 0.0          # 30% clients là attackers
+attack-type = "backdoor" 
+attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
 random-noise-scale = 0.7   # Biên độ nhiễu Uniform [-scale, scale]
@@ -82,7 +82,7 @@ backdoor-pattern-size = 3   # Kích thước vùng trigger
 backdoor-scaling-factor = 1.0
 
 # 6. ALIE (A Little Is Enough)
-alie-z = 2.5              # Hệ số z 
+alie-z = 1.5              # Hệ số z 
 
 # 7. Min-Max
 minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
@@ -99,7 +99,7 @@ onoff-frequency = 5
 onoff-attack = "sign_flip"
 
 # Cường độ attack (cho mode "scale" và "noise")
-onoff-attack-scale = 2.0
+onoff-attack-scale = 1.0
 
 # 9. Slow Poison 
 # Tỷ lệ poison mỗi round (0.1 = 10% poison + 90% benign)
@@ -110,7 +110,7 @@ slow-poison-rate = 0.5
 # - "random": Hướng ngẫu nhiên
 # - "targeted": Bias về một hướng cố định
 # - "drift": Negative với strength tăng dần
-slow-poison-direction = "negative"
+slow-poison-direction = "random"
 
 # Số rounds đầu hoàn toàn benign (build trust trước)
 slow-poison-warmup = 5
@@ -146,10 +146,10 @@ alpha-h-mult = 0.5         # H multiplier (α tăng khi H tăng)
 alpha-min = 0.1            # Min historical weight (luôn giữ 1 ít historical)
 alpha-max = 0.8            # Max historical weight (không bỏ hết current)
 momentum-decay = 0.9       # EMA decay cho momentum update
-min-history-rounds = 3     # Số round tối thiểu để dùng historical
+min-history-rounds = 10     # Số round tối thiểu để dùng historical
 
 # =====================================================================
-# LAYER 1: ENHANCED DBSCAN (V2 - 3 trạng thái)
+# LAYER 1: ENHANCED DBSCAN 
 # =====================================================================
 # CHỈ CHẠY SAU WARMUP (vòng 11+)
 # REJECTED: ||gi|| > Median + 15×MAD
@@ -161,9 +161,9 @@ min-history-rounds = 3     # Số round tối thiểu để dùng historical
 
 pca-dims = 20
 dbscan-min-samples = 3
-dbscan-eps-multiplier = 0.5
+dbscan-eps-multiplier = 1.5
 mad-k-reject = 10.0
-mad-k-flag = 5.0
+mad-k-flag = 4.0
 voting-threshold = 3
 zero-cluster-action = "accept_all"
 
@@ -178,7 +178,7 @@ cosine-threshold = 0.3
 
 enable-rescue = true
 
-rescue-cosine-threshold = 0.7     
+rescue-cosine-threshold = 0.8     
 require-distance-pass = true       
 
 # =====================================================================
@@ -190,14 +190,14 @@ require-distance-pass = true
 [tool.flwr.app.config.defense.noniid]
 
 # H Score weights (must sum to 1.0)
-weight-cv = 0.1
-weight-sim = 0.2
-weight-cluster = 0.7
+weight-cv = 0.4
+weight-sim = 0.4
+weight-cluster = 0.2
 
 # θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
-adjustment-factor = 0.3
+adjustment-factor = 0.2
 theta-adj-clip-min = 0.5
-theta-adj-clip-max = 0.9
+theta-adj-clip-max = 0.8
 
 # Baseline tracking
 baseline-window-size = 10
@@ -212,15 +212,17 @@ grad-ema-decay = 0.3
 # =====================================================================
 # CONFIDENCE SCORING 
 # =====================================================================
-# ci = clip((0.4×I_Flagged + 0.3×I_Fail_Euclidean + 0.3×δi) × factor, 0, 1)
+# ci = clip((weight-flagged×I_Flagged + weight-euclidean×I_Fail_Euclidean + weight-baseline×δi) × factor, 0, 1)
 # =====================================================================
 [tool.flwr.app.config.defense.confidence]
 
-weight-flagged = 0.4
-weight-euclidean = 0.3
-weight-baseline = 0.3
-baseline-suspicious-threshold = 0.25
+weight-flagged = 0.3
+weight-euclidean = 0.2
+weight-baseline = 0.5
+
+baseline-suspicious-threshold = 0.15
 baseline-factor-suspicious = 0.7
+
 rescued-penalty = 0.4 
 rescued-suspicious-penalty = 0.7
 rescued_euclidean = 0.5
@@ -240,13 +242,13 @@ rescued_euclidean = 0.5
 [tool.flwr.app.config.defense.filtering]
 
 # Ngưỡng cơ sở (θ_base)
-hard-threshold-base = 0.85
-soft-threshold-base = 0.65
+hard-threshold-base = 0.7
+soft-threshold-base = 0.4
 
 # τ_mode - ngưỡng reputation theo mode
-soft-rep-threshold-normal = 0.2
-soft-rep-threshold-alert = 0.4
-soft-rep-threshold-defense = 0.6
+soft-rep-threshold-normal = 0.6
+soft-rep-threshold-alert = 0.7
+soft-rep-threshold-defense = 0.8
 
 # =====================================================================
 # REPUTATION SYSTEM 

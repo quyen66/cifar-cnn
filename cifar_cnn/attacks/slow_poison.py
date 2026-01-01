@@ -88,9 +88,9 @@ class SlowPoisoningClient(AttackClient):
         # ═══════════════════════════════════════════════════════════════════
         if server_round <= self.warmup_rounds:
             results["is_malicious"] = 1
-            results["attack_active"] = 0  # Không attack
-            results["poison_rate_actual"] = 0.0
-            results["round_used"] = server_round
+            results["attack_active"] = 0
+            results["poison_rate_actual"] = 0.0  # Already float
+            results["round_used"] = int(server_round)  # Convert to Python int
             return trained_params, len(self.trainloader.dataset), results
         
         # ═══════════════════════════════════════════════════════════════════
@@ -121,7 +121,12 @@ class SlowPoisoningClient(AttackClient):
             if self.poison_direction in ["negative", "drift", "zero"]:
                 u_poison = -u_benign
             elif self.poison_direction == "random":
-                u_poison = np.random.randn(*u_benign.shape).astype(np.float32)
+                if u_benign.shape == ():
+                    # Trường hợp scalar (0-d array)
+                    u_poison = np.array(np.random.randn(), dtype=np.float32)
+                else:
+                    # Trường hợp vector/tensor bình thường
+                    u_poison = np.random.randn(*u_benign.shape).astype(np.float32)
                 # Normalize về cùng magnitude với benign
                 norm_b = np.linalg.norm(u_benign)
                 norm_p = np.linalg.norm(u_poison)
@@ -158,10 +163,10 @@ class SlowPoisoningClient(AttackClient):
         
         results["is_malicious"] = 1
         results["attack_active"] = 1
-        results["poison_rate_actual"] = current_rate
+        results["poison_rate_actual"] = float(current_rate)  # Convert to Python float
         results["attack_type"] = f"slow_poison_{self.poison_direction}"
-        results["round_used"] = server_round
-        results["attack_cosine"] = avg_cos
+        results["round_used"] = int(server_round)  # Convert to Python int
+        results["attack_cosine"] = float(avg_cos)  # Convert to Python float
         
         return malicious_params, len(self.trainloader.dataset), results
 

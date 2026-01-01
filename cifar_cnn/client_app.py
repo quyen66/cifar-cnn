@@ -36,7 +36,7 @@ class FlowerClient(NumPyClient):
     
     def __init__(self, net, trainloader, testloader, device, local_epochs, 
                  learning_rate=0.001, use_mixed_precision=True, proximal_mu=0.01,
-                 partition_id=None):  # ===== FIX: Thêm partition_id =====
+                 partition_id=None):  
         self.net = net
         self.trainloader = trainloader
         self.testloader = testloader
@@ -45,7 +45,7 @@ class FlowerClient(NumPyClient):
         self.learning_rate = learning_rate
         self.use_mixed_precision = use_mixed_precision
         self.proximal_mu = proximal_mu
-        self.partition_id = partition_id  # ===== FIX =====
+        self.partition_id = partition_id 
         
     def fit(self, parameters, config):
         set_parameters(self.net, parameters)
@@ -67,15 +67,14 @@ class FlowerClient(NumPyClient):
             global_params
         )
         
-        # --- FIX: Gửi partition_id trong metrics ---
         is_malicious_flag = 0
         if self.__class__.__name__ != "FlowerClient":
              is_malicious_flag = 1
              
         metrics = {
-            "train_loss": train_loss["train_loss"],
-            "is_malicious": is_malicious_flag,
-            "partition_id": self.partition_id  # ===== FIX =====
+            "train_loss": float(train_loss["train_loss"]),  # Convert to Python float
+            "is_malicious": int(is_malicious_flag),  # Convert to Python int
+            "partition_id": int(self.partition_id) if self.partition_id is not None else 0  # Convert to Python int
         }
         
         return get_parameters(self.net), len(self.trainloader.dataset), metrics
@@ -83,7 +82,7 @@ class FlowerClient(NumPyClient):
     def evaluate(self, parameters, config):
         set_parameters(self.net, parameters)
         loss, accuracy = test(self.net, self.testloader, self.device)
-        return loss, len(self.testloader.dataset), {"accuracy": accuracy}
+        return float(loss), len(self.testloader.dataset), {"accuracy": float(accuracy)}
 
 
 # ============================================
@@ -147,7 +146,7 @@ def client_fn(context: Context) -> Client:
         
         def wrapped_fit(parameters, config):
             params, num_examples, metrics = original_fit(parameters, config)
-            metrics["partition_id"] = partition_id  # Inject partition_id
+            metrics["partition_id"] = int(partition_id)  # Ensure Python int
             return params, num_examples, metrics
         
         client.fit = wrapped_fit
@@ -191,7 +190,6 @@ def client_fn(context: Context) -> Client:
         return client.to_client()
         
     elif attack_type == "backdoor":
-        #poison_ratio = float(context.run_config.get("attack-ratio", 0.1))  
         target_label = int(context.run_config.get("backdoor-label", 0))
         pixel_count = int(context.run_config.get("backdoor-pixel-count", 4))
         scaling_factor = float(context.run_config.get("backdoor-scaling-factor", 10.0))
