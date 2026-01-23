@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+import numpy as np
 
 class CNN(nn.Module):
     """CNN model cho CIFAR-10."""
@@ -54,6 +57,78 @@ class CNN(nn.Module):
 def get_model():
     return CNN(num_classes=10)
 
+def load_data(partition_id, num_partitions, batch_size=128):
+    """
+    Load CIFAR-10 data for validation purposes.
+    
+    Args:
+        partition_id: Which partition to use (0 to num_partitions-1)
+        num_partitions: Total number of partitions
+        batch_size: Batch size for DataLoader
+    
+    Returns:
+        (trainloader, testloader) - both DataLoaders
+    """
+    # Get transforms
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+    
+    # Load datasets
+    trainset = datasets.CIFAR10(
+        root="./data", train=True, download=True, transform=transform
+    )
+    testset = datasets.CIFAR10(
+        root="./data", train=False, download=True, transform=transform
+    )
+    
+    # Create simple IID partitions
+    train_size = len(trainset)
+    test_size = len(testset)
+    
+    train_indices = np.arange(train_size)
+    test_indices = np.arange(test_size)
+    
+    np.random.shuffle(train_indices)
+    np.random.shuffle(test_indices)
+    
+    # Calculate partition sizes
+    train_per_partition = train_size // num_partitions
+    test_per_partition = test_size // num_partitions
+    
+    # Get indices for this partition
+    train_start = partition_id * train_per_partition
+    train_end = train_start + train_per_partition if partition_id < num_partitions - 1 else train_size
+    
+    test_start = partition_id * test_per_partition
+    test_end = test_start + test_per_partition if partition_id < num_partitions - 1 else test_size
+    
+    partition_train_indices = train_indices[train_start:train_end]
+    partition_test_indices = test_indices[test_start:test_end]
+    
+    # Create subsets
+    train_subset = Subset(trainset, partition_train_indices)
+    test_subset = Subset(testset, partition_test_indices)
+    
+    # Create dataloaders
+    trainloader = DataLoader(
+        train_subset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True
+    )
+    
+    testloader = DataLoader(
+        test_subset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True
+    )
+    
+    return trainloader, testloader
 
 def train(net, trainloader, epochs, device, learning_rate=0.001, 
           use_mixed_precision=True, proximal_mu=0.0, global_params=None):

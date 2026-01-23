@@ -35,23 +35,13 @@ __all__ = [
     'weighted_average_aggregation',
     'trimmed_mean_aggregation',
     'coordinate_median_aggregation',
-    'aggregate_by_mode',  # <<< FIXED: Added comma here
+    'aggregate_by_mode',  
     
     # 6. Adaptive Reference (NEW)
-    'AdaptiveReferenceTracker'
+    'AdaptiveReferenceTracker',
+    
 ]
 
 # Version info updated to match pyproject.toml
 __version__ = '2.1.0'
 __status__ = 'Production (Soft Pipeline V2 + Adaptive Reference)'
-
-print(f"✅ Defense package loaded: v{__version__} ({__status__})")
-print(f"   1. Layer1Detector: Enhanced DBSCAN (Hard Kill)")
-print(f"   2. Layer2Detector: Distance + Direction (Redemption)")
-print(f"   3. NonIIDHandler: Heterogeneity Analysis (H, δi)")
-print(f"   4. ConfidenceScorer: Anomaly Scoring (ci calculation)")
-print(f"   5. TwoStageFilter: Adaptive Thresholds (Hard/Soft)")
-print(f"   6. ReputationSystem: Asymmetric EMA & Adaptive Penalty")
-print(f"   7. ModeController: 3-mode Switching (Normal/Alert/Defense)")
-print(f"   8. Aggregator: Mode-adaptive Aggregation")
-print(f"   9. AdaptiveReferenceTracker: Hybrid Reference (NEW)")

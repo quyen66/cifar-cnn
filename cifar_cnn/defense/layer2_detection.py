@@ -31,6 +31,7 @@ MA TRẬN QUYẾT ĐỊNH (Giai đoạn 3 trong PDF):
 └─────────────┴──────────────┴─────────────┴──────────────────────┘
 """
 
+from http.client import ACCEPTED
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from enum import Enum
@@ -159,7 +160,7 @@ class Layer2Detector:
 
             # Áp dụng ma trận quyết định
             result, suspicion = self._apply_decision_matrix(
-                layer1_status, fail_cosine, fail_distance, can_rescue
+                layer1_status, fail_cosine, fail_distance, can_rescue, dist, distance_threshold, cos
             )
             
             final_status[cid] = result.value
@@ -325,7 +326,10 @@ class Layer2Detector:
         layer1_status: str,
         fail_cosine: bool,
         fail_distance: bool,
-        can_rescue: bool
+        can_rescue: bool,
+        distance: float,          
+        distance_threshold: float,   
+        cosine: float 
     ) -> Tuple[Layer2Result, Optional[SuspicionLevel]]:
         """
         Áp dụng ma trận quyết định
@@ -349,7 +353,14 @@ class Layer2Detector:
         # L1 ACCEPTED + Cosine OK
         if fail_distance:
             # Distance lớn nhưng hướng đúng → nghi ngờ
-            return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
+            extreme_distance = distance > 2.0 * distance_threshold
+            marginal_cosine = cosine < 0.85
+            
+            if extreme_distance and marginal_cosine:
+                return Layer2Result.REJECTED, None  
+            else:
+                return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
+
         
         # L1 ACCEPTED + Cosine OK + Distance OK → Hoàn toàn sạch
         return Layer2Result.ACCEPTED, SuspicionLevel.CLEAN
