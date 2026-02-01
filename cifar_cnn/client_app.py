@@ -67,12 +67,22 @@ class FlowerClient(NumPyClient):
             global_params
         )
         
+        
         is_malicious_flag = 0
         if self.__class__.__name__ != "FlowerClient":
              is_malicious_flag = 1
              
+        # Lấy loss (Safe get)
+        loss_val = train_loss.get("train_loss", 0.0)
+        
+        # Lấy accuracy (Safe get - Cần đảm bảo task.py trả về 'train_accuracy')
+        acc_val = train_loss.get("train_accuracy", 0.0)
+        
+             
         metrics = {
-            "train_loss": float(train_loss["train_loss"]),  # Convert to Python float
+            "loss": float(loss_val),          # Key chuẩn cho Server
+            "accuracy": float(acc_val),       # Key chuẩn cho Server
+            "train_loss": float(loss_val),    # Giữ key cũ để tương thích ngược (nếu cần)
             "is_malicious": int(is_malicious_flag),  # Convert to Python int
             "partition_id": int(self.partition_id) if self.partition_id is not None else 0  # Convert to Python int
         }
@@ -147,6 +157,12 @@ def client_fn(context: Context) -> Client:
         def wrapped_fit(parameters, config):
             params, num_examples, metrics = original_fit(parameters, config)
             metrics["partition_id"] = int(partition_id)  # Ensure Python int
+            # Đảm bảo có key "loss" và "accuracy" cho Server
+            if "loss" not in metrics:
+                metrics["loss"] = metrics.get("train_loss", 0.0)
+            if "accuracy" not in metrics:
+                metrics["accuracy"] = metrics.get("train_accuracy", 0.0)
+                
             return params, num_examples, metrics
         
         client.fit = wrapped_fit

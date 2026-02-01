@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-H Weights Dense Grid Generator
-===============================
+Hybrid H-Score Dense Grid Generator
+====================================
 
-Generate dense grid of H weight combinations for thorough optimization.
+Generate dense grid of H weight combinations for HYBRID H-SCORE:
+  H = weight_h_grad × H_grad + weight_h_loss × H_loss + weight_h_acc × H_acc
 
 Options:
-    --grid-step: Grid spacing (default: 0.05 for ~80 configs)
+    --grid-step: Grid spacing (default: 0.1)
     --min-value: Minimum value for any weight (default: 0.1)
     
 Usage:
-    python3 generate_h_weights_dense.py --grid-step 0.05
-    python3 generate_h_weights_dense.py --grid-step 0.1    # Faster, ~30 configs
+    python3 param_generator.py --grid-step 0.1
+    python3 param_generator.py --grid-step 0.05  # Slower, more configs
 """
 
 import json
@@ -20,16 +21,16 @@ from datetime import datetime
 from typing import List, Dict, Tuple
 
 
-class DenseHWeightGenerator:
-    """Generate dense grid of H weight combinations."""
+class HybridHWeightGenerator:
+    """Generate dense grid of hybrid H weight combinations."""
     
-    def __init__(self, grid_step: float = 0.05, min_value: float = 0.1):
+    def __init__(self, grid_step: float = 0.1, min_value: float = 0.1):
         """
         Initialize generator.
         
         Args:
-            grid_step: Step size for grid (0.05 or 0.1)
-            min_value: Minimum allowed value for any weight
+            grid_step: Step size for grid (0.1 or 0.05)
+            min_value: Minimum allowed value for any weight (NO ZEROS!)
         """
         self.grid_step = grid_step
         self.min_value = min_value
@@ -44,11 +45,11 @@ class DenseHWeightGenerator:
     
     def _generate_combinations(self) -> List[Tuple[float, float, float]]:
         """
-        Generate all valid (cv, sim, cluster) combinations.
+        Generate all valid (grad, loss, acc) combinations.
         
         Constraints:
-        1. cv + sim + cluster = 1.0
-        2. All values >= min_value
+        1. grad + loss + acc = 1.0
+        2. All values >= min_value (NO ZEROS!)
         3. All values are multiples of grid_step
         """
         combinations = []
@@ -61,39 +62,52 @@ class DenseHWeightGenerator:
             grid_points.append(round(value, 2))
             value += self.grid_step
         
-        # Try all cv, sim combinations
-        for cv in grid_points:
-            for sim in grid_points:
-                # Calculate cluster
-                cluster = round(1.0 - cv - sim, 2)
+        # Try all grad, loss combinations
+        for grad in grid_points:
+            for loss in grid_points:
+                # Calculate acc
+                acc = round(1.0 - grad - loss, 2)
                 
                 # Check constraints
-                if cluster >= self.min_value and cluster <= max_value:
+                if acc >= self.min_value and acc <= max_value:
                     # Verify sum = 1.0 (handle floating point)
-                    total = cv + sim + cluster
+                    total = grad + loss + acc
                     if abs(total - 1.0) < 1e-6:
-                        combinations.append((cv, sim, cluster))
+                        combinations.append((grad, loss, acc))
         
         return combinations
     
-    def _get_profile_name(self, cv: float, sim: float, cluster: float) -> str:
-        """Get descriptive profile name."""
+    def _get_profile_name(self, grad: float, loss: float, acc: float) -> str:
+        """Get descriptive profile name based on weight distribution."""
         
-        # Check if PDF default
-        if abs(cv - 0.4) < 0.01 and abs(sim - 0.4) < 0.01 and abs(cluster - 0.2) < 0.01:
-            return "pdf_default"
+        # Check if default recommended
+        if abs(grad - 0.2) < 0.01 and abs(loss - 0.4) < 0.01 and abs(acc - 0.4) < 0.01:
+            return "golden_ratio"
         
         # Find dominant component
-        max_weight = max(cv, sim, cluster)
+        max_weight = max(grad, loss, acc)
         
-        if max_weight == cv and cv >= 0.45:
-            return "cv_emphasis"
-        elif max_weight == sim and sim >= 0.45:
-            return "sim_emphasis"
-        elif max_weight == cluster and cluster >= 0.35:
-            return "cluster_emphasis"
-        elif abs(cv - sim) < 0.1 and abs(cv - cluster) < 0.1:
+        # Strong emphasis cases (>= 0.5)
+        if max_weight == grad and grad >= 0.5:
+            return "grad_dominant"
+        elif max_weight == loss and loss >= 0.5:
+            return "loss_dominant"
+        elif max_weight == acc and acc >= 0.5:
+            return "acc_dominant"
+        
+        # Moderate emphasis cases (>= 0.4)
+        elif max_weight == grad and grad >= 0.4:
+            return "grad_emphasis"
+        elif max_weight == loss and loss >= 0.4:
+            return "loss_emphasis"
+        elif max_weight == acc and acc >= 0.4:
+            return "acc_emphasis"
+        
+        # Balanced case
+        elif abs(grad - loss) < 0.15 and abs(grad - acc) < 0.15:
             return "balanced"
+        
+        # Mixed cases
         else:
             return "mixed"
     
@@ -102,33 +116,34 @@ class DenseHWeightGenerator:
         
         configs = []
         
-        for idx, (cv, sim, cluster) in enumerate(self.combinations, 1):
+        for idx, (grad, loss, acc) in enumerate(self.combinations, 1):
             config = {
                 'config_id': idx,
-                'weight_cv': cv,
-                'weight_sim': sim,
-                'weight_cluster': cluster,
-                'profile': self._get_profile_name(cv, sim, cluster)
+                'weight_h_grad': grad,
+                'weight_h_loss': loss,
+                'weight_h_acc': acc,
+                'profile': self._get_profile_name(grad, loss, acc)
             }
             configs.append(config)
         
         suite = {
             'metadata': {
-                'generator': 'generate_h_weights_dense.py',
-                'version': '2.0.0',
+                'generator': 'param_generator.py',
+                'version': '3.0.0-hybrid',
                 'timestamp': datetime.now().isoformat(),
                 'total_configs': len(configs),
-                'optimization_phase': 'Phase 1 - H Weights Dense Grid',
+                'optimization_phase': 'Phase 1 - Hybrid H Weights Dense Grid',
+                'h_score_formula': 'H = w_grad*H_grad + w_loss*H_loss + w_acc*H_acc',
                 'grid_step': self.grid_step,
                 'min_value': self.min_value,
                 'fixed_params': {
-                    'h_threshold_normal': 0.6,
-                    'h_threshold_alert': 0.5,
-                    'adjustment_factor': 0.4,
-                    'baseline_percentile': 60,
+                    'adjustment_factor': 0.1,
+                    'theta_adj_clip_min': 0.3,
+                    'theta_adj_clip_max': 0.8,
                     'baseline_window_size': 10,
                     'delta_norm_weight': 0.5,
-                    'delta_direction_weight': 0.5
+                    'delta_direction_weight': 0.5,
+                    'grad_ema_decay': 0.3
                 }
             },
             'suite': {
@@ -144,7 +159,7 @@ class DenseHWeightGenerator:
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             step_str = str(self.grid_step).replace('.', '')
-            filename = f"h_weights_dense_{step_str}_{timestamp}.json"
+            filename = f"hybrid_h_weights_grid{step_str}_{timestamp}.json"
         
         with open(filename, 'w') as f:
             json.dump(suite, f, indent=2)
@@ -153,11 +168,21 @@ class DenseHWeightGenerator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate dense H weights grid')
-    parser.add_argument('--grid-step', type=float, default=0.05,
-                       help='Grid step size (default: 0.05)')
-    parser.add_argument('--min-value', type=float, default=0.1,
-                       help='Minimum value for any weight (default: 0.1)')
+    parser = argparse.ArgumentParser(
+        description='Generate dense grid of hybrid H-score weights'
+    )
+    parser.add_argument(
+        '--grid-step', 
+        type=float, 
+        default=0.1,
+        help='Grid step size (default: 0.1)'
+    )
+    parser.add_argument(
+        '--min-value', 
+        type=float, 
+        default=0.1,
+        help='Minimum value for any weight (default: 0.1)'
+    )
     
     args = parser.parse_args()
     
@@ -171,12 +196,13 @@ def main():
         return
     
     print("=" * 80)
-    print("H WEIGHTS DENSE GRID GENERATOR")
+    print("HYBRID H-SCORE DENSE GRID GENERATOR")
+    print("Formula: H = w_grad×H_grad + w_loss×H_loss + w_acc×H_acc")
     print("=" * 80)
     print()
     
     # Generate suite
-    generator = DenseHWeightGenerator(
+    generator = HybridHWeightGenerator(
         grid_step=args.grid_step,
         min_value=args.min_value
     )
@@ -187,11 +213,12 @@ def main():
     print(f"   Total configurations: {suite['metadata']['total_configs']}")
     print(f"   Grid step: {args.grid_step}")
     print(f"   Min value: {args.min_value}")
+    print(f"   Constraint: All weights >= {args.min_value} (NO ZEROS)")
     print()
     
     # Estimate time
     configs = len(suite['suite']['h_weights'])
-    time_per_config = 40  # minutes (conservative)
+    time_per_config = 40  # minutes (conservative, 30 rounds)
     total_hours = (configs * time_per_config) / 60
     
     print(f"⏱️  Estimated Time:")
@@ -207,19 +234,40 @@ def main():
     
     print(f"📈 Profile Breakdown:")
     for profile, count in sorted(profiles.items(), key=lambda x: -x[1]):
-        print(f"   {profile:20s}: {count:3d} configs ({count/configs*100:.1f}%)")
+        pct = count / configs * 100
+        print(f"   {profile:20s}: {count:3d} configs ({pct:5.1f}%)")
     print()
     
     # Sample configs
     print(f"📋 Sample Configurations:")
+    print(f"   {'ID':<5} {'Profile':<20} {'Grad':<6} {'Loss':<6} {'Acc':<6} {'Sum':<6}")
+    print(f"   {'-'*5} {'-'*20} {'-'*6} {'-'*6} {'-'*6} {'-'*6}")
+    
     samples = [0, configs//4, configs//2, 3*configs//4, configs-1]
     for i in samples:
         if i < len(suite['suite']['h_weights']):
-            config = suite['suite']['h_weights'][i]
-            print(f"   Config #{config['config_id']:3d} ({config['profile']:15s}): "
-                  f"CV={config['weight_cv']:.2f}, "
-                  f"sim={config['weight_sim']:.2f}, "
-                  f"cluster={config['weight_cluster']:.2f}")
+            cfg = suite['suite']['h_weights'][i]
+            total = cfg['weight_h_grad'] + cfg['weight_h_loss'] + cfg['weight_h_acc']
+            print(f"   {cfg['config_id']:<5d} {cfg['profile']:<20s} "
+                  f"{cfg['weight_h_grad']:<6.2f} "
+                  f"{cfg['weight_h_loss']:<6.2f} "
+                  f"{cfg['weight_h_acc']:<6.2f} "
+                  f"{total:<6.2f}")
+    print()
+    
+    # Check for recommended baseline
+    has_golden = any(
+        abs(c['weight_h_grad'] - 0.2) < 0.01 and 
+        abs(c['weight_h_loss'] - 0.4) < 0.01 and 
+        abs(c['weight_h_acc'] - 0.4) < 0.01
+        for c in suite['suite']['h_weights']
+    )
+    
+    if has_golden:
+        print(f"✅ Golden Ratio baseline (0.2, 0.4, 0.4) included!")
+    else:
+        print(f"⚠️  Golden Ratio baseline (0.2, 0.4, 0.4) NOT in grid")
+        print(f"   (Grid step {args.grid_step} may skip it)")
     print()
     
     # Save
@@ -232,15 +280,21 @@ def main():
     print("NEXT STEPS")
     print("=" * 80)
     print()
-    print("Run tests:")
-    print(f"  python3 run_h_weight_tests_chdir.py {filename}")
+    print("1. Run tests:")
+    print(f"   python3 run_param_tests.py {filename}")
+    print()
+    print("2. With resume support:")
+    print(f"   python3 run_param_tests.py {filename} --resume")
     print()
     print(f"⚠️  This will take ~{total_hours:.0f} hours!")
     print()
-    print("Consider:")
+    print("💡 Recommendations:")
     print("  - Run overnight/weekend")
-    print("  - Use --grid-step 0.1 for faster testing (~30 configs, ~20 hours)")
+    print("  - Use --grid-step 0.1 for faster testing (recommended)")
+    print("  - Use --grid-step 0.05 for thorough search (~4x configs)")
     print("  - Resume if interrupted with --resume flag")
+    print()
+    print("📊 Output: benchmark_results.csv with all metrics")
     print()
 
 

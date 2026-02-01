@@ -42,6 +42,7 @@ from cifar_cnn.defense import (
 )
 from cifar_cnn.defense.reputation import ClientStatus 
 from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker 
+from round_logger import RoundLogger
 
 def weighted_average(metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, Scalar]:
     """Aggregate evaluation metrics."""
@@ -83,6 +84,7 @@ class FullPipelineStrategy(FedProx):
         self.start_time = datetime.now()
         self.detection_history = []
         self.current_parameters = kwargs.get('initial_parameters')
+        self.last_h_score = 0.0
         
         self.enable_defense = bool(enable_defense)
         self.defense_params = defense_params or {}
@@ -144,7 +146,7 @@ class FullPipelineStrategy(FedProx):
         self.aggregator = Aggregator(**self.defense_params.get('aggregation', {}))
         
         adaptive_ref_params = self.defense_params.get('adaptive_reference', {})
-        self.adaptive_ref_tracker = AdaptiveReferenceTracker(
+        self.ref_tracker = AdaptiveReferenceTracker(
             alpha_base=adaptive_ref_params.get('alpha_base', 0.2),
             alpha_h_mult=adaptive_ref_params.get('alpha_h_mult', 0.5),
             alpha_min=adaptive_ref_params.get('alpha_min', 0.1),
@@ -153,10 +155,65 @@ class FullPipelineStrategy(FedProx):
             warmup_rounds=self.warmup_rounds,
             min_history_rounds=adaptive_ref_params.get('min_history_rounds', 3)
         )
-
+        
+        import os
+        os.makedirs("tuning_logs", exist_ok=True)
+        self.round_logger = RoundLogger(log_file="tuning_logs/detection_detail.log")
     
     def _identify_malicious_clients(self) -> Set[int]:
         return set()
+
+    def is_malicious(self, partition_id: int) -> bool:
+        """
+        Check if a partition_id is malicious.
+        
+        Args:
+            partition_id: Sequential partition ID (0-based)
+            
+        Returns:
+            True if malicious, False otherwise
+        """
+        num_clients = self.config_metadata.get('num_clients', 40)
+        attack_ratio = self.config_metadata.get('attack_ratio', 0.0)
+        num_malicious = int(num_clients * attack_ratio)
+        
+        # First N clients are malicious
+        return partition_id < num_malicious
+
+    def _aggregate_parameters_by_mode(
+            self,
+            results: List[Tuple[any, FitRes]],
+            mode: str,
+            reputations: Dict[any, float]
+        ) -> List[np.ndarray]:
+        """Aggregate parameters using Aggregator's mode-based aggregation."""
+        if not results:
+            return None
+        
+        all_params = [parameters_to_ndarrays(res.parameters) for _, res in results]
+        num_layers = len(all_params[0])
+        
+        # Get reputation list
+        client_ids = [cid for cid, _ in results]
+        reputation_list = [reputations.get(cid, 1.0) for cid in client_ids]
+        
+        # Aggregate layer by layer
+        aggregated = []
+        for layer_idx in range(num_layers):
+            # Flatten each layer
+            layer_grads = [params[layer_idx].flatten() for params in all_params]
+            
+            # Aggregate
+            agg_flat = self.aggregator.aggregate_by_mode(
+                gradients=layer_grads,
+                mode=mode,
+                reputations=reputation_list
+            )
+            
+            # Reshape
+            aggregated.append(agg_flat.reshape(all_params[0][layer_idx].shape))
+        
+        return aggregated
 
     def _identify_trusted_clients(self) -> Set[int]:
         num_clients = self.config_metadata.get('num_clients', 40)
@@ -240,406 +297,290 @@ class FullPipelineStrategy(FedProx):
         fit_ins = FitIns(parameters, config)
         return [(all_clients_dict[cid], fit_ins) for cid in sampled_cids]
 
-
     def aggregate_fit(
         self,
         server_round: int,
         results: List[Tuple[any, FitRes]],
         failures: List[Tuple[any, FitRes] | BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]] | None:
-        start_time = time.time()
-        if not results: return None
-        should_save = self.auto_save and (server_round % self.save_interval == 0)
-
-        if not self.enable_defense: 
-            res = super().aggregate_fit(server_round, results, failures)
-            if should_save: self._save_checkpoint(server_round)
-            return res
-
-        start_time = time.time()
-
-        # ================= PHASE 1: TRUSTED WARM-UP =================
-        if server_round <= self.warmup_rounds:
-            print(f"\n{'='*70}")
-            print(f"ROUND {server_round} - PHASE 1: TRUSTED WARM-UP")
-            print(f"{'='*70}")
-            
-            # ===== Debug logging để xem client.cid =====
-            result_cids = [c.cid for c, _ in results]
-            print(f"   🔍 [DEBUG] Received {len(results)} results")
-            print(f"   🔍 [DEBUG] Result CIDs: {result_cids[:5]}...")
-            # ===== END DEBUG =====
-            
-            trusted_grads = []
-            trusted_reps = []
-            trusted_count = 0
-            malicious_count = 0
-            trusted_proxies_round1 = []  # Lưu trusted proxies
-            
-            global_weights_warmup = parameters_to_ndarrays(self.current_parameters)
-            global_flat = np.concatenate([x.flatten() for x in global_weights_warmup])
-            print(f"   📐 Global weights norm: {np.linalg.norm(global_flat):.4f}")
-            
-            for client, res in results:
-                # ===== Read partition_id from metrics =====
-                partition_id = res.metrics.get("partition_id", None)
-                
-                if partition_id is None:
-                    continue
-                
-                partition_id = int(partition_id)
-                self.client_id_to_sequential[client.cid] = partition_id
-                self.sequential_to_client_id[partition_id] = client.cid
-                
-                is_mal = bool(res.metrics.get("is_malicious", 0))
-                if is_mal:
-                    malicious_count += 1
-                
-                if partition_id in self.trusted_clients:
-                    trusted_count += 1
-                    
-                    if is_mal:
-                        print(f"   WARNING: Partition {partition_id} trusted but malicious!")
-                        continue
-                    
-                    # Lưu proxy của trusted client
-                    trusted_proxies_round1.append(client)
-                    
-                    p = parameters_to_ndarrays(res.parameters)
-                    w_client_flat = np.concatenate([x.flatten() for x in p])
-                    update_flat = w_client_flat - global_flat  # UPDATE = W_client - W_global
-                    trusted_grads.append(update_flat)
-                    
-                    self.noniid_handler.update_client_gradient(partition_id, update_flat) 
-                    self.reputation_system.initialize_client(partition_id, is_trusted=True)
-                    trusted_reps.append(1.0)
-                
-            if server_round == 1:
-                self.warmup_client_proxies = trusted_proxies_round1
-                print(f"   💾 [FIX V8] Saved {len(trusted_proxies_round1)} TRUSTED proxies for rounds 2-10")
-                       
-            
-            print(f"   📊 Warmup Stats:")
-            print(f"      - Results received: {len(results)}")
-            print(f"      - Matched trusted set: {trusted_count}")
-            print(f"      - Used for aggregation: {len(trusted_grads)}")
-            print(f"      - Malicious in batch: {malicious_count}")
-
-            if not trusted_grads:
-                print("   ⚠️  No trusted clients sampled in Warm-up. Skipping update.")
-                print(f"   🔍 [DEBUG] Trusted set: {sorted(self.trusted_clients)}")
-                partition_ids = [res.metrics.get("partition_id", "N/A") for _, res in results]
-                print(f"   [DEBUG] Partition IDs from metrics: {partition_ids}")
-                if should_save: self._save_checkpoint(server_round) 
-                return self.current_parameters, {}
-
-            agg_grad = self.aggregator.weighted_average(trusted_grads, trusted_reps)
-            self._update_parameters(agg_grad, results[0][1].parameters)
-            
-            # Save Momentum from Warmup
-            try:
-                if agg_grad is not None:
-                    if isinstance(agg_grad, list):
-                         self.previous_full_grad = np.concatenate([x.flatten() for x in agg_grad])
-                    else:
-                         self.previous_full_grad = agg_grad.flatten()
-            except Exception as e:
-                print(f"   ⚠️ Warning: Momentum update failed in Warmup: {e}")
-            
-             # === adaptive reference momentum với clean warmup gradient ===
-            if hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
-                self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
-            
-            print(f"   ✅ Warmup aggregation successful with {len(trusted_grads)} trusted clients")
-            print(f"   Heterogeneity Score H = 0.000 (Warmup)") 
-            self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0)
-            if should_save: self._save_checkpoint(server_round)
-            return self.current_parameters, {}
-
-
-        # ================= PHASE 2: FULL ADAPTIVE DEFENSE =================
-        print(f"\n{'='*70}")
-        print(f"ROUND {server_round} - PHASE 2: SOFT PIPELINE DEFENSE (FULL MODEL)")
-        print(f"{'='*70}")
-
-        full_gradients = []       
-        seq_cids = []
-        gt_malicious_batch = []
+        """
+        Aggregate fit results using Hybrid Adaptive Defense System.
+        Updated: Support Hybrid H-Score (Gradient + Loss + Accuracy).
+        """
         
+        if not results:
+            return None, {}
+
+        # Do not aggregate if there are failures and failures are not allowed
+        if not self.accept_failures and failures:
+            return None, {}
+
+        # =========================================================================
+        # 1. PREPARATION & SORTING
+        # =========================================================================
+        # Sắp xếp results theo CID để đảm bảo thứ tự nhất quán giữa các list
+        sorted_results = sorted(results, key=lambda x: int(x[0].cid))
+        
+        # Convert parameters to ndarrays (gradients)
+        # Lưu ý: Chúng ta cần Global Model của vòng này để tính gradient (Update = W_client - W_global)
+        # Flower strategy lưu model vòng này trong self.current_parameters (nếu được cập nhật đúng)
         global_weights = parameters_to_ndarrays(self.current_parameters)
-        global_flat = np.concatenate([x.flatten() for x in global_weights])
+        
+        client_gradients = []
+        client_losses = []     
+        client_accuracies = []  
+        seq_cids = []
+        
+        # Map CID to result for aggregation later
+        cid_to_result = {}
 
-        for c, res in results:
-            p = parameters_to_ndarrays(res.parameters)
-            w_client_flat = np.concatenate([x.flatten() for x in p])
-            # Tính vector cập nhật (Update / Pseudo-gradient)
-            # update = w_client - w_global
-            update_flat = w_client_flat - global_flat
-            full_gradients.append(update_flat)
-            
-            real_cid_str = c.cid
-            
-            partition_id = res.metrics.get("partition_id", None)
-            if partition_id is not None:
-                seq_id = int(partition_id)
-                self.client_id_to_sequential[c.cid] = seq_id
-                self.sequential_to_client_id[seq_id] = c.cid
-            else:
-                seq_id = self.client_id_to_sequential.get(c.cid, len(self.client_id_to_sequential))
-                if c.cid not in self.client_id_to_sequential:
-                    self.client_id_to_sequential[c.cid] = seq_id
-            
-            seq_cids.append(seq_id)
-            
-            is_mal = bool(res.metrics.get("is_malicious", 0))
-            gt_malicious_batch.append(is_mal)
+        for idx, (client, fit_res) in enumerate(sorted_results):
+            metrics = fit_res.metrics
 
-        num_mal = sum(gt_malicious_batch)
-        print(f"   🔍 [DEBUG] Ground Truth from Metrics: {num_mal} attackers in batch.")
         
-        # === Tính H score TRƯỚC để dùng cho adaptive reference ===
-        for local_idx, seq_id in enumerate(seq_cids):
-            self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
-        
-        H_early = self.noniid_handler.compute_heterogeneity_score(full_gradients, seq_cids)
-        
-        # === Tính Adaptive Reference ===
-        if hasattr(self, 'adaptive_ref_tracker'):
-            reference_vector = self.adaptive_ref_tracker.compute_adaptive_reference(
-                full_gradients, 
-                h_score=H_early, 
-                current_round=server_round
+        # for client, fit_res in sorted_results:
+        #     cid = int(client.cid)
+        #     seq_cids.append(cid)
+        #     cid_to_result[cid] = (client, fit_res)
+            
+            # --- [NEW] EXTRACT METRICS (LOSS & ACCURACY) ---
+            partition_id = int(metrics.get("partition_id", idx))
+            seq_cids.append(partition_id)
+            cid_to_result[partition_id] = (client, fit_res)
+            # Lấy Loss (Default 0.0 nếu client quên gửi)
+            loss = metrics.get("loss", 0.0)
+            client_losses.append(loss)
+            
+            # Lấy Accuracy (Default 0.0 nếu client quên gửi)
+            acc = metrics.get("accuracy", 0.0)
+            client_accuracies.append(acc)
+            
+            # --- EXTRACT GRADIENTS ---
+            client_params = parameters_to_ndarrays(fit_res.parameters)
+            # Tính Update Vector: update = client_params - global_weights
+            # (Hoặc dùng trực tiếp client_params nếu Layer 1 của bạn xử lý weights)
+            # Ở đây ta tính update vector cho chuẩn logic Defense
+            gradient = [w_c - w_g for w_c, w_g in zip(client_params, global_weights)]
+            # Flatten for defense layers (46 arrays → 1 flat array)
+            gradient_flat = np.concatenate([arr.flatten() for arr in gradient])
+            client_gradients.append(gradient_flat)
+
+
+        # Lấy Ground Truth (nếu chạy mô phỏng) để log metrics
+        gt_malicious_batch = [self.is_malicious(cid) for cid in seq_cids]
+
+        # =========================================================================
+        # 2. WARMUP PHASE CHECK
+        # =========================================================================
+        # Trong giai đoạn warmup, bỏ qua defense hoặc dùng logic đơn giản
+        if server_round <= self.warmup_rounds:
+            print(f"\n🔥 WARMUP ROUND {server_round}/{self.warmup_rounds}: Aggregating all results...")
+            
+            # Update history cho NonIID Handler dù đang warmup (để xây dựng baseline)
+            self.noniid_handler.compute_heterogeneity_score(client_gradients, client_losses, client_accuracies)
+            for i, cid in enumerate(seq_cids):
+                self.noniid_handler.compute_baseline_deviation(cid, client_gradients[i])
+            
+            # Update Adaptive Reference (để sẵn sàng cho vòng 11)
+            # Dùng FedAvg đơn giản cho warmup
+            aggregated_ndarrays = self._aggregate_parameters_by_mode(
+                results=sorted_results, 
+                mode="NORMAL", 
+                reputations={cid: 1.0 for cid in seq_cids}
             )
-        else:
-            reference_vector = np.median(np.vstack(full_gradients), axis=0)
-            print("   🛡️  Using Current Round Coordinate Median as Reference")
+            
+            # Save weights for next round
+            self.current_parameters = ndarrays_to_parameters(aggregated_ndarrays)
+            return self.initial_parameters, {"mode": "WARMUP"}
+
+        # =========================================================================
+        # 3. DEFENSE PIPELINE EXECUTION
+        # =========================================================================
         
-        # 1. Detection Layers
-        l1_res = self.layer1_detector.detect(full_gradients, seq_cids, current_round=server_round, is_malicious_ground_truth=gt_malicious_batch)
-        
-        l2_status, l2_suspicion = self.layer2_detector.detect(
-            full_gradients, 
-            seq_cids, 
-            l1_res, 
-            current_round=server_round, 
-            is_malicious_ground_truth=gt_malicious_batch, 
-            external_reference=reference_vector
+        # --- Bước 1: Layer 1 Detection (Enhanced DBSCAN) ---
+        layer1_results = self.layer1_detector.detect(
+            gradients=client_gradients,
+            client_ids=seq_cids,
+            current_round=server_round,
+            is_malicious_ground_truth=gt_malicious_batch # For logging only
         )
 
-        # 2. Non-IID Handler: Calculate H Score
-        for local_idx, seq_id in enumerate(seq_cids):
-            self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
-        
-        H = H_early  # Sử dụng H đã tính trước đó
-        print(f"\n   🌐 Heterogeneity Score H = {H:.4f}")
-        
-        # 3. Confidence Scoring - Use correct method calculate_scores
-        baseline_deviations = {}
-        for i, seq_id in enumerate(seq_cids):
-            detail = self.noniid_handler.compute_baseline_deviation_detailed(
-                seq_id, full_gradients[i], reference_vector
+        # --- Bước 2: Layer 2 Detection (Distance + Direction) ---
+        # Lấy tham chiếu thích ứng (Adaptive Reference)
+        ref_vector = None
+        if self.ref_tracker:
+            ref_vector = self.ref_tracker.compute_adaptive_reference(
+                current_gradients=client_gradients,
+                h_score=self.last_h_score,  
+                current_round=server_round
             )
-            baseline_deviations[seq_id] = detail['delta_combined']
         
+        layer2_status, suspicion_levels = self.layer2_detector.detect(
+            gradients=client_gradients,
+            client_ids=seq_cids,
+            layer1_results=layer1_results,
+            current_round=server_round,
+            is_malicious_ground_truth=gt_malicious_batch,
+            external_reference=ref_vector
+        )
+
+        # --- Bước 3: Non-IID Handler (Tính H-Score Hybrid) ---
+        # [QUAN TRỌNG] Truyền Loss và Accuracy vào đây
+        H = self.noniid_handler.compute_heterogeneity_score(
+            client_gradients=client_gradients,
+            client_losses=client_losses,     
+            client_accuracies=client_accuracies 
+        )
+        self.last_h_score = H
+        
+        # Tính Baseline Deviation cho từng client
+        baseline_deviations = {}
+        for i, cid in enumerate(seq_cids):
+            delta = self.noniid_handler.compute_baseline_deviation(
+                client_id=cid,
+                current_gradient=client_gradients[i]
+            )
+            baseline_deviations[cid] = delta
+
+        # --- Bước 4: Confidence Scoring ---
         confidence_scores = self.confidence_scorer.calculate_scores(
             client_ids=seq_cids,
-            layer1_results=l1_res,
-            layer2_status=l2_status,
-            suspicion_levels=l2_suspicion,
+            layer1_results=layer1_results,
+            layer2_status=layer2_status,
+            suspicion_levels=suspicion_levels,
             baseline_deviations=baseline_deviations
         )
 
-        # 4. Determine client status and update reputation
-        client_statuses = {}
-        for seq_id in seq_cids:
-            # l1_res returns string, l2_status is REJECTED/ACCEPTED, l2_suspicion is clean/suspicious
-            l1_status = l1_res.get(seq_id, 'ACCEPTED')
-            l2_stat = l2_status.get(seq_id, 'ACCEPTED')
-            l2_susp = l2_suspicion.get(seq_id, 'clean')
-            
-            if l1_status == 'REJECTED' or l2_stat == 'REJECTED':
-                status = ClientStatus.REJECTED
-            elif l1_status == 'FLAGGED' or l2_susp == 'suspicious':
-                status = ClientStatus.SUSPICIOUS
-            else:
-                status = ClientStatus.CLEAN
-            client_statuses[seq_id] = status
+        # --- Bước 5: Reputation System Update ---
+        # Dùng median gradient của round này làm mốc so sánh hướng (P)
+        grad_matrix = np.vstack([g.flatten() for g in client_gradients])
+        median_grad = np.median(grad_matrix, axis=0)
         
-        old_reps = {seq_id: self.reputation_system.get_reputation(seq_id) for seq_id in seq_cids}
-        
-        # Update reputations - Use correct method name and params
-        grad_median = np.median(np.vstack(full_gradients), axis=0)
-        for local_idx, seq_id in enumerate(seq_cids):
-            grad = full_gradients[local_idx]
-            status = client_statuses[seq_id]
-            
-            self.reputation_system.update(
-                client_id=seq_id,
-                gradient=grad,
-                grad_median=grad_median,
-                status=status,
-                heterogeneity_score=H,
-                current_round=server_round
-            )
+        current_reputations = {}
+        old_reps = self.reputation_system.get_all_reputations() # For debug comparison
 
-        # 5. Two-Stage Filtering - Use correct method name and params
-        reputations = {seq_id: self.reputation_system.get_reputation(seq_id) 
-                      for seq_id in seq_cids}
-        
-        # ═══════════════════════════════════════════════════════════════════
-        # 📊 REPUTATION TABLE - Hiển thị R của từng client + tăng/giảm
-        # ═══════════════════════════════════════════════════════════════════
-        print(f"\n{'─'*82}")
-        print(f"📊 REPUTATION CHANGES - Round {server_round}")
-        print(f"{'─'*82}")
-        print(f"  {'ID':>3} │ {'GT':^5} │ {'Status':^10} │ {'Old R':>8} │ {'New R':>8} │ {'Δ':>9} │ Note")
-        print(f"  {'─'*3}─┼─{'─'*5}─┼─{'─'*10}─┼─{'─'*8}─┼─{'─'*8}─┼─{'─'*9}─┼─{'─'*12}")
-        
-        # Tính changes và sort (drops lớn nhất trước)
-        rep_changes = []
-        for seq_id in seq_cids:
-            old_r = old_reps[seq_id]
-            new_r = reputations[seq_id]
-            delta = new_r - old_r
-            rep_changes.append((seq_id, old_r, new_r, delta))
-        rep_changes.sort(key=lambda x: x[3])  # Sort by delta (drops first)
-        
-        for seq_id, old_r, new_r, delta in rep_changes:
-            # Ground truth
-            idx = seq_cids.index(seq_id)
-            is_mal = gt_malicious_batch[idx] if idx < len(gt_malicious_batch) else False
-            gt_str = "⚠️MAL" if is_mal else "✅BEN"
+        for i, cid in enumerate(seq_cids):
+            # Map status từ Layer 1/2 sang Reputation Status
+            status = ClientStatus.CLEAN
+            if layer1_results.get(cid) == "REJECTED" or layer2_status.get(cid) == "REJECTED":
+                status = ClientStatus.REJECTED
+            elif layer1_results.get(cid) == "FLAGGED": # Rescued but Flagged
+                 status = ClientStatus.SUSPICIOUS
+            elif suspicion_levels.get(cid) == "suspicious": # L2 Suspicious
+                 status = ClientStatus.SUSPICIOUS
             
-            # Status
-            st = client_statuses.get(seq_id, ClientStatus.CLEAN)
-            st_str = "REJECTED" if st == ClientStatus.REJECTED else ("SUSPICIOUS" if st == ClientStatus.SUSPICIOUS else "CLEAN")
-            
-            # Change indicator
-            if delta > 0.01:
-                d_str = f"↑ +{delta:.4f}"
-                note = ""
-            elif delta < -0.01:
-                d_str = f"↓ {delta:.4f}"
-                note = ""
-            else:
-                d_str = f"  ={delta:+.4f}"
-                note = ""
-            
-            # Highlight anomalies
-            if not is_mal and delta < -0.05:
-                note = "⚠️BEN R↓↓"   # Benign mất nhiều R
-            elif is_mal and delta > 0.05:
-                note = "⚠️MAL R↑↑"   # Malicious được tăng R
-            elif is_mal and new_r > 0.7:
-                note = "⚠️MAL HIGH"  # Malicious có R cao
-            elif not is_mal and new_r < 0.3:
-                note = "⚠️BEN LOW"   # Benign có R thấp
-                
-            print(f"  {seq_id:>3} │ {gt_str:^5} │ {st_str:^10} │ {old_r:>8.4f} │ {new_r:>8.4f} │ {d_str:>9} │ {note}")
-        
-        print(f"  {'─'*82}")
-        
-        # Summary
-        mal_r = [reputations[seq_cids[i]] for i, m in enumerate(gt_malicious_batch) if m]
-        ben_r = [reputations[seq_cids[i]] for i, m in enumerate(gt_malicious_batch) if not m]
-        if mal_r:
-            print(f"  📌 Malicious: avg={np.mean(mal_r):.4f}, min={min(mal_r):.4f}, max={max(mal_r):.4f}")
-        if ben_r:
-            print(f"  📌 Benign:    avg={np.mean(ben_r):.4f}, min={min(ben_r):.4f}, max={max(ben_r):.4f}")
-        
-        # Cảnh báo nếu benign bị giảm R nhiều
-        bad_ben = sum(1 for i, seq_id in enumerate(seq_cids) 
-                      if not gt_malicious_batch[i] and reputations[seq_id] - old_reps[seq_id] < -0.05)
-        if bad_ben > 0:
-            print(f"  ⚠️ WARNING: {bad_ben} benign clients lost >5% reputation!")
-        print(f"{'─'*82}\n")
-        
-        current_mode = self.mode_controller.get_current_mode()
-        
-        trusted_set, all_filtered, filter_stats = self.two_stage_filter.filter_clients(
+            # Cập nhật Reputation
+            new_rep = self.reputation_system.update(
+                client_id=cid,
+                gradient=client_gradients[i].flatten(),
+                grad_median=median_grad,
+                status=status,
+                heterogeneity_score=H
+            )
+            current_reputations[cid] = new_rep
+
+        # --- Bước 6: Mode Controller ---
+        # Compute threat_ratio (ρ) and detected_clients for ModeController
+        # detected_clients = clients rejected by Layer1 OR Layer2
+        detected_clients = [
+            cid for cid in seq_cids
+            if layer1_results.get(cid) == "REJECTED" or layer2_status.get(cid) == "REJECTED"
+        ]
+        threat_ratio = len(detected_clients) / len(seq_cids) if seq_cids else 0.0
+
+        current_mode = self.mode_controller.update_mode(
+            threat_ratio=threat_ratio,
+            detected_clients=detected_clients,
+            reputations=current_reputations,
+            current_round=server_round
+        )
+
+        # --- Bước 7: Two-Stage Filtering ---
+        trusted_clients, all_filtered, filter_stats = self.two_stage_filter.filter_clients(
             client_ids=seq_cids,
             confidence_scores=confidence_scores,
-            reputations=reputations,
+            reputations=current_reputations,
             mode=current_mode,
             H=H,
             noniid_handler=self.noniid_handler
         )
         
-        hard_filtered = set(filter_stats.get('hard_filtered_ids', []))
-        soft_filtered = set(filter_stats.get('soft_filtered_ids', []))
+        # =========================================================================
+        # 3b. ROUND LOGGING — chi tiết detection per-round
+        # =========================================================================
+        # Expose rescue_cosine_threshold vào layer2_stats cho Table 3 header
+        layer2_stats_for_log = dict(self.layer2_detector.last_stats)
+        layer2_stats_for_log["rescue_cosine_threshold"] = getattr(
+            self.layer2_detector, 'rescue_cosine_threshold', 0.8)
+
+        self.round_logger.log_round(
+            round_num=server_round,
+            mode=current_mode,
+            H=H,
+            seq_cids=seq_cids,
+            gt_malicious=gt_malicious_batch,
+            layer1_result=self.layer1_detector.last_result,
+            layer2_stats=layer2_stats_for_log,
+            layer2_drift_info=self.layer2_detector.last_drift_info,
+            layer2_status=layer2_status,
+            suspicion_levels=suspicion_levels,
+            confidence_scores=confidence_scores,
+            reputations=current_reputations,
+            filter_stats=filter_stats,
+            ref_alpha=self.ref_tracker.last_alpha_used if self.ref_tracker else 0.0,
+            accuracy=None   # set later nếu có evaluate result
+        )
+
+        # =========================================================================
+        # 4. AGGREGATION & UPDATE
+        # =========================================================================
         
-        detection_rejected = {seq_id for seq_id in seq_cids 
-                             if client_statuses.get(seq_id) == ClientStatus.REJECTED}
-        all_filtered = all_filtered | detection_rejected  # Union 2 sets
-        
+        # Chỉ lấy results của Trusted Clients
+        trusted_results = []
+        for cid in trusted_clients:
+            if cid in cid_to_result:
+                trusted_results.append(cid_to_result[cid])
+
+        # Log kết quả cuối cùng của vòng
         print(f"\n   🔒 Two-Stage Filter (Mode={current_mode}):")
-        print(f"      Hard Filter: {len(hard_filtered)} rejected")
-        print(f"      Soft Filter: {len(soft_filtered)} rejected")
-        print(f"      Detection Rejected (L1+L2): {len(detection_rejected)}")
+        print(f"      Hard Filter: {filter_stats.get('hard_filtered_count', 0)} rejected")
+        print(f"      Soft Filter: {filter_stats.get('soft_filtered_count', 0)} rejected")
+        print(f"      Detection Rejected (L1+L2): {len([c for c in seq_cids if layer1_results[c]=='REJECTED' or layer2_status[c]=='REJECTED'])}")
         print(f"      Total Filtered: {len(all_filtered)}")
-        
-        # 6. Mode Controller Update - Use update_mode with correct signature
-        threat_ratio = len(all_filtered) / len(seq_cids) if seq_cids else 0
-        new_mode = self.mode_controller.update_mode(
-            threat_ratio=threat_ratio,
-            detected_clients=list(all_filtered),
-            reputations=reputations,
-            current_round=server_round
+
+        # Nếu không còn client nào tin cậy (trường hợp cực đoan), dùng lại global cũ
+        if not trusted_results:
+            print("⚠️ CRITICAL: No trusted clients! Skipping aggregation.")
+            return self.current_parameters, {}
+
+        # Tổng hợp tham số (Aggregation)
+        aggregated_ndarrays = self._aggregate_parameters_by_mode(
+            results=trusted_results,
+            mode=current_mode,
+            reputations=current_reputations
         )
         
-        if new_mode != current_mode:
-            print(f"   ⚡ Mode Changed: {current_mode} → {new_mode}")
+        # Update Adaptive Reference Tracker (cho vòng sau)
+        # H càng cao -> càng tin vào lịch sử (Historical Momentum)
+        if self.ref_tracker:
+            self.ref_tracker.update_momentum(
+                aggregated_gradient=aggregated_ndarrays,
+                current_round=server_round
+            )
 
-        # 7. Aggregation
-        clean_indices = [i for i, seq_id in enumerate(seq_cids) if seq_id not in all_filtered]
-        clean_grads = [full_gradients[i] for i in clean_indices]
-        clean_reps = [reputations[seq_cids[i]] for i in clean_indices]
         
-        print(f"\n   📦 Aggregation:")
-        print(f"      Clean clients: {len(clean_indices)}/{len(seq_cids)}")
-        print(f"      Mode: {new_mode}")
-        
-        if not clean_grads:
-            print("   ⚠️  No clean clients! Using median of all gradients.")
-            agg_grad = self.aggregator.coordinate_median(full_gradients)
-        elif new_mode == "NORMAL":
-            agg_grad = self.aggregator.weighted_average(clean_grads, clean_reps)
-        elif new_mode == "ALERT":
-            agg_grad = self.aggregator.trimmed_mean(clean_grads, threat_ratio)
-        else:  # DEFENSE
-            agg_grad = self.aggregator.coordinate_median(clean_grads)
+        # Lưu lại Global Weights mới cho vòng sau
+        self.current_parameters = ndarrays_to_parameters(aggregated_ndarrays)
 
-        self._update_parameters(agg_grad, results[0][1].parameters)
-        
-        try:
-            if agg_grad is not None:
-                if isinstance(agg_grad, list):
-                    self.previous_full_grad = np.concatenate([x.flatten() for x in agg_grad])
-                else:
-                    self.previous_full_grad = agg_grad.flatten()
-        except Exception as e:
-            print(f"   ⚠️ Warning: Momentum update failed: {e}")
-            
-        # === Update adaptive reference momentum với clean aggregated gradient ===
-        if hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
-            self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
+        # Trả về metrics để Flower log lại
+        metrics_aggregated = {
+            "H_score": H,
+            "Mode": current_mode,
+            "Trusted_Count": len(trusted_clients),
+            "Filtered_Count": len(all_filtered)
+        }
 
-        # 8. Metrics Calculation
-        self._calculate_metrics(
-            server_round, 
-            seq_cids, 
-            gt_malicious_batch, 
-            all_filtered,
-            H, 
-            threat_ratio,
-            time.time() - start_time
-        )
-        
-        if should_save: 
-            self._save_checkpoint(server_round)
-        
-        print(f"⏱️ [ROUND {server_round}] Server Processing Time: {time.time() - start_time:.4f}s")
-        return self.current_parameters, {}
+        return self.current_parameters, metrics_aggregated
 
     def _update_parameters(self, agg_grad, sample_params):
         if agg_grad is None:
@@ -785,18 +726,21 @@ def server_fn(context: Context) -> ServerAppComponents:
             'cosine_threshold': float(context.run_config.get("defense.layer2.cosine-threshold", 0.3)),
             'enable_rescue': context.run_config.get("defense.layer2.enable-rescue", False),
             'rescue_cosine_threshold': float(context.run_config.get("defense.layer2.rescue-cosine-threshold", 0.7)),
-            'require_distance_pass_for_rescue': context.run_config.get("defense.layer2.require-distance-pass", True)
+            'require_distance_pass_for_rescue': context.run_config.get("defense.layer2.require-distance-pass", True),
+            'enable_drift_detection' : context.run_config.get("defense.layer2.enable-drift-detection", False),
+            'drift_threshold' : float(context.run_config.get("defense.layer2.drift-threshold", 0.7)),          
+            'drift_window' : int(context.run_config.get("defense.layer2.drift-window", 0.7)) 
         }
         defense_params['noniid'] = {
-            'weight_cv': float(context.run_config.get("defense.noniid.weight-cv", 0.4)),
-            'weight_sim': float(context.run_config.get("defense.noniid.weight-sim", 0.4)),
-            'weight_cluster': float(context.run_config.get("defense.noniid.weight-cluster", 0.2)),
             'adjustment_factor': float(context.run_config.get("defense.noniid.adjustment-factor", 0.4)),
             'theta_adj_clip_min': float(context.run_config.get("defense.noniid.theta-adj-clip-min", 0.5)),
             'theta_adj_clip_max': float(context.run_config.get("defense.noniid.theta-adj-clip-max", 0.9)),
             'baseline_window_size': int(context.run_config.get("defense.noniid.baseline-window-size", 10)),
             'delta_norm_weight': float(context.run_config.get("defense.noniid.delta-norm-weight", 0.5)),
-            'delta_direction_weight': float(context.run_config.get("defense.noniid.delta-direction-weight", 0.5))
+            'delta_direction_weight': float(context.run_config.get("defense.noniid.delta-direction-weight", 0.5)),
+            'weight_h_grad': float(context.run_config.get("defense.noniid.weight-h-grad", 0.4)),
+            'weight_h_loss': float(context.run_config.get("defense.noniid.weight-h-loss", 0.4)),
+            'weight_h_acc': float(context.run_config.get("defense.noniid.weight-h-acc", 0.2)),
         }
         defense_params['confidence'] = {
             'weight_flagged': float(context.run_config.get("defense.confidence.weight-flagged", 0.4)),

@@ -175,6 +175,9 @@ def train(net, trainloader, epochs, device, learning_rate=0.001,
     
     total_loss = 0.0
     
+    correct_train = 0
+    total_train = 0
+    
     for epoch in range(epochs):
         epoch_loss = 0.0
         for images, labels in trainloader:
@@ -237,10 +240,17 @@ def train(net, trainloader, epochs, device, learning_rate=0.001,
                 optimizer.step()
             
             epoch_loss += total_batch_loss.item()
+            
+            _, predicted = torch.max(outputs.data, 1)
+            total_train += labels.size(0)
+            correct_train += (predicted == labels).sum().item()
         
         total_loss += epoch_loss / len(trainloader)
+        
+    final_train_accuracy = correct_train / total_train if total_train > 0 else 0.0
     
-    return {"train_loss": total_loss / epochs}
+    return {"train_loss": total_loss / epochs,
+            "train_accuracy": final_train_accuracy}
 
 
 def test(net, testloader, device):
@@ -283,7 +293,7 @@ def set_parameters(net, parameters):
         net.load_state_dict(state_dict, strict=True)
     else:
         # Partial update (Chỉ Weights) - Fallback
-        # print(f"⚠️ Warning: Set params partial update ({len(parameters)}/{len(keys)})")
+        print(f"⚠️ Warning: Set params partial update ({len(parameters)}/{len(keys)})")
         state_dict = net.state_dict()
         # Giả định parameters chỉ chứa weights theo thứ tự trainable
         # Cần cẩn thận, nhưng thường Flower truyền weights theo thứ tự net.parameters()
