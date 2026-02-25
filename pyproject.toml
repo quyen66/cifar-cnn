@@ -51,7 +51,8 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg1_acc_dominant/slow_poison"
+save-dir = "saved_models/tuning_cfg024/label_flip"
+detection-log-path = "saved_models/detail_cfg/cfg024/label_flip"
 save-interval = 10
 resume-from = ""
 
@@ -62,7 +63,7 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "slow_poison" 
+attack-type = "label_flip"
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
@@ -196,9 +197,9 @@ drift-window = 5
 [tool.flwr.app.config.defense.noniid]
 
 # TRỌNG SỐ MỚI CHO HYBRID H-SCORE (Tổng = 1.0)
-weight-h-grad = 0.2    # Trọng số cho Gradient (giữ tính Defense)
-weight-h-loss = 0.4    # Trọng số cho Loss CV (ổn định khi hội tụ)
-weight-h-acc = 0.4     # Trọng số cho Accuracy CV (ổn định)
+weight-h-grad = 0.4
+weight-h-loss = 0.3
+weight-h-acc = 0.3
 
 # θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
 adjustment-factor = 0.1

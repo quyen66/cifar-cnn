@@ -42,7 +42,7 @@ from cifar_cnn.defense import (
 )
 from cifar_cnn.defense.reputation import ClientStatus 
 from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker 
-from round_logger import RoundLogger
+from .round_logger import RoundLogger
 
 def weighted_average(metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, Scalar]:
     """Aggregate evaluation metrics."""
@@ -66,8 +66,9 @@ class FullPipelineStrategy(FedProx):
                  start_round=0,
                  enable_defense=False,
                  defense_params=None,
-                 warmup_rounds=10, 
-                 **kwargs):
+                 warmup_rounds=10,
+                 log_filename="tuning_logs/detection_detail.log",
+                 **kwargs) :
         super().__init__(*args, **kwargs)
         
         self.client_id_to_sequential = {}
@@ -100,6 +101,13 @@ class FullPipelineStrategy(FedProx):
         
         self.previous_full_grad = None
         self.warmup_client_proxies = None # cố định client proxies trong warmup
+        log_dir = os.path.dirname(log_filename)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        self.round_logger = RoundLogger(log_file=log_filename)
+
+
         
         # Mapping sẽ được xây dựng khi cần từ actual client.cid
         print(f"   📋 Trusted Clients Set: {sorted(self.trusted_clients)}")
@@ -113,6 +121,7 @@ class FullPipelineStrategy(FedProx):
             self._initialize_defense_components()
     
     def _initialize_defense_components(self):
+        
         self.layer1_detector = Layer1Detector(**self.defense_params.get('layer1', {}))
         self.layer2_detector = Layer2Detector(**self.defense_params.get('layer2', {}))
         self.noniid_handler = NonIIDHandler(**self.defense_params.get('noniid', {}))
@@ -156,10 +165,6 @@ class FullPipelineStrategy(FedProx):
             min_history_rounds=adaptive_ref_params.get('min_history_rounds', 3)
         )
         
-        import os
-        os.makedirs("tuning_logs", exist_ok=True)
-        self.round_logger = RoundLogger(log_file="tuning_logs/detection_detail.log")
-    
     def _identify_malicious_clients(self) -> Set[int]:
         return set()
 
@@ -704,6 +709,8 @@ def server_fn(context: Context) -> ServerAppComponents:
 
     enable_defense = context.run_config.get("enable-defense", True)
     if isinstance(enable_defense, str): enable_defense = enable_defense.lower() == 'true'
+    
+    log_filename = context.run_config.get("detection-log-path", "tuning_logs/detection_detail.log")
         
     warmup_rounds = int(context.run_config.get("warmup-rounds", 10))
     attack_type = context.run_config.get("attack-type", "none")
@@ -848,7 +855,8 @@ def server_fn(context: Context) -> ServerAppComponents:
         start_round=0,
         enable_defense=enable_defense,
         defense_params=defense_params,
-        warmup_rounds=warmup_rounds
+        warmup_rounds=warmup_rounds,
+        log_filename = log_filename
     )
     
     config = ServerConfig(num_rounds=num_rounds)

@@ -258,6 +258,14 @@ class Layer2Detector:
         
         self.last_stats = stats
         
+        self.last_drift_info = {
+            cid: {
+                "direction": drift_detected[cid],
+                "trend": list(self.norm_history.get(cid, []))
+            }
+            for cid in drift_detected
+        }
+        
         # Log results
         self._log_results(
             client_ids, final_status, suspicion_levels,
