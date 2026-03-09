@@ -5,7 +5,7 @@ Xử lý dữ liệu không đồng nhất để giảm false positives.
 
 Components theo PDF:
 1. Heterogeneity Score (H): Đo mức độ non-IID
-   H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+
 
 2. Adaptive Threshold (θ_adj): Điều chỉnh ngưỡng dựa trên H
    θ_adj = clip(θbase + (H - 0.5) × 0.4, 0.5, 0.9)
