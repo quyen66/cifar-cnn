@@ -31,10 +31,11 @@ MA TRẬN QUYẾT ĐỊNH (Giai đoạn 3 trong PDF):
 └─────────────┴──────────────┴─────────────┴──────────────────────┘
 """
 
+from http.client import ACCEPTED
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from enum import Enum
-from collections import deque
+
 
 class Layer2Result(Enum):
     """Kết quả cuối cùng sau Layer 2."""
@@ -61,9 +62,6 @@ class Layer2Detector:
         enable_rescue: bool = False,
         rescue_cosine_threshold: float = 0.7,  # Ngưỡng cosine để rescue (cao hơn reject)
         require_distance_pass_for_rescue: bool = True,  # Phải pass distance để rescue
-        enable_drift_detection: bool = False,
-        drift_threshold: float = 0.1,
-        drift_window: int = 5,
     ):
         """
         Initialize Layer 2 Detector.
@@ -74,74 +72,14 @@ class Layer2Detector:
         self.rescue_cosine_threshold = rescue_cosine_threshold
         self.require_distance_pass_for_rescue = require_distance_pass_for_rescue
         self.last_stats = {}
-        self.enable_drift_detection = enable_drift_detection
-        self.drift_threshold = drift_threshold
-        self.drift_window = drift_window
-        self.norm_history = {}
         
-        print(f"✅ Layer2Detector initialized:")
+        print(f"✅ Layer2Detector V2 initialized:")
         print(f"   Distance multiplier: {distance_multiplier}")
         print(f"   Cosine threshold (reject): {cosine_threshold}")
         print(f"   Enable rescue: {enable_rescue}")
         if enable_rescue:
             print(f"   Rescue cosine threshold: {rescue_cosine_threshold}")
             print(f"   Require distance pass: {require_distance_pass_for_rescue}")
-        if enable_drift_detection:
-            print(f"   🔍 Drift detection ENABLED:")
-            print(f"      Window: {drift_window} rounds")
-            print(f"      Threshold: {drift_threshold}")
-
-    def _update_norm_history(self, client_id: int, norm: float):
-        """
-        Track norm history for drift detection.
-        
-        Args:
-            client_id: Client ID
-            norm: L2 norm of gradient this round
-        """
-        if client_id not in self.norm_history:
-            self.norm_history[client_id] = deque(maxlen=self.drift_window)
-        
-        self.norm_history[client_id].append(norm)
-    
-    def _detect_drift(self, client_id: int) -> Tuple[bool, Optional[str]]:
-        """
-        Detect if client shows consistent drift pattern.
-        
-        Slow poison creates consistent increasing/decreasing trend.
-        Benign clients fluctuate randomly.
-        
-        Returns:
-            (is_drifting: bool, drift_direction: Optional[str])
-        """
-        if client_id not in self.norm_history:
-            return False, None
-        
-        history = list(self.norm_history[client_id])
-        
-        # Need at least 5 rounds
-        if len(history) < self.drift_window:
-            return False, None
-        
-        # Calculate differences between consecutive rounds
-        diffs = [history[i+1] - history[i] for i in range(len(history)-1)]
-        
-        # Check for consistent direction
-        all_increasing = all(d > 0 for d in diffs)
-        all_decreasing = all(d < 0 for d in diffs)
-        
-        consistent_direction = all_increasing or all_decreasing
-        
-        # Check for significant total drift
-        total_drift = abs(history[-1] - history[0])
-        significant_drift = total_drift > self.drift_threshold
-        
-        # Determine drift direction
-        if consistent_direction and significant_drift:
-            direction = "increasing" if all_increasing else "decreasing"
-            return True, direction
-        
-        return False, None
 
     def detect(
         self,
@@ -181,10 +119,6 @@ class Layer2Detector:
         # Truyền external_reference xuống để tính khoảng cách chuẩn xác
         distances, cosines, median_grad = self._compute_metrics(gradients, reference_vector=external_reference)
         
-        if self.enable_drift_detection:
-            grad_matrix = np.vstack([g.flatten() for g in gradients])
-            norms = np.array([np.linalg.norm(g) for g in grad_matrix])
-
         # Tính ngưỡng distance động (Adaptive Threshold)
         median_distance = np.median(distances)
         distance_threshold = self.distance_multiplier * median_distance
@@ -200,7 +134,6 @@ class Layer2Detector:
         # =========================================================
         final_status = {}
         suspicion_levels = {}
-        drift_detected = {}
         
         # Stats for debugging
         stats = {
@@ -215,9 +148,6 @@ class Layer2Detector:
             dist = distances[i]
             cos = cosines[i]
             
-            if self.enable_drift_detection:
-                self._update_norm_history(cid, norms[i])
-            
             # Logic check vi phạm
             fail_distance = dist > distance_threshold
             fail_cosine = cos <= self.cosine_threshold
@@ -230,16 +160,9 @@ class Layer2Detector:
 
             # Áp dụng ma trận quyết định
             result, suspicion = self._apply_decision_matrix(
-                layer1_status, fail_cosine, fail_distance, can_rescue
+                layer1_status, fail_cosine, fail_distance, can_rescue, dist, distance_threshold, cos
             )
-            if self.enable_drift_detection and result == Layer2Result.ACCEPTED:
-                is_drifting, drift_dir = self._detect_drift(cid)
-                if is_drifting:
-                    print(f"      🔍 DRIFT DETECTED: Client {cid} ({drift_dir} trend over {self.drift_window} rounds)")
-                    result = Layer2Result.REJECTED 
-                    suspicion = None
-                    drift_detected[cid] = drift_dir
-
+            
             final_status[cid] = result.value
             suspicion_levels[cid] = suspicion.value if suspicion else None
             
@@ -256,14 +179,6 @@ class Layer2Detector:
             })
         
         self.last_stats = stats
-        
-        self.last_drift_info = {
-            cid: {
-                "direction": drift_detected[cid],
-                "trend": list(self.norm_history.get(cid, []))
-            }
-            for cid in drift_detected
-        }
         
         # Log results
         self._log_results(
@@ -411,7 +326,10 @@ class Layer2Detector:
         layer1_status: str,
         fail_cosine: bool,
         fail_distance: bool,
-        can_rescue: bool
+        can_rescue: bool,
+        distance: float,          
+        distance_threshold: float,   
+        cosine: float 
     ) -> Tuple[Layer2Result, Optional[SuspicionLevel]]:
         """
         Áp dụng ma trận quyết định
@@ -435,7 +353,14 @@ class Layer2Detector:
         # L1 ACCEPTED + Cosine OK
         if fail_distance:
             # Distance lớn nhưng hướng đúng → nghi ngờ
-            return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
+            extreme_distance = distance > 2.0 * distance_threshold
+            marginal_cosine = cosine < 0.85
+            
+            if extreme_distance and marginal_cosine:
+                return Layer2Result.REJECTED, None  
+            else:
+                return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
+
         
         # L1 ACCEPTED + Cosine OK + Distance OK → Hoàn toàn sạch
         return Layer2Result.ACCEPTED, SuspicionLevel.CLEAN

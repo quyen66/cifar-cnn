@@ -5,7 +5,7 @@ Xử lý dữ liệu không đồng nhất để giảm false positives.
 
 Components theo PDF:
 1. Heterogeneity Score (H): Đo mức độ non-IID
-
+   H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
 
 2. Adaptive Threshold (θ_adj): Điều chỉnh ngưỡng dựa trên H
    θ_adj = clip(θbase + (H - 0.5) × 0.4, 0.5, 0.9)
@@ -43,9 +43,9 @@ class NonIIDHandler:
     def __init__(
         self,
         # H Score weights (phải sum = 1.0)
-        weight_h_grad: float = 0.2,
-        weight_h_loss: float = 0.4,
-        weight_h_acc: float = 0.4,
+        weight_cv: float = 0.4,
+        weight_sim: float = 0.4,
+        weight_cluster: float = 0.2,
         # θ_adj parameters (theo PDF)
         adjustment_factor: float = 0.4,  # Hệ số trong công thức θ_adj
         theta_adj_clip_min: float = 0.5,  # Min của θ_adj
@@ -56,7 +56,7 @@ class NonIIDHandler:
         delta_norm_weight: float = 0.5,
         delta_direction_weight: float = 0.5,
         # EMA decay cho running mean gradient
-        grad_ema_decay: float = 0.3,
+        grad_ema_decay: float = 0.3
     ):
         """
         Initialize Non-IID Handler.
@@ -74,16 +74,18 @@ class NonIIDHandler:
             grad_ema_decay: Decay rate cho running mean gradient
         """
         # Validate H weights
-        h_weight_sum = weight_h_grad + weight_h_loss + weight_h_acc
+        h_weight_sum = weight_cv + weight_sim + weight_cluster
         if abs(h_weight_sum - 1.0) > 1e-6:
             raise ValueError(
                 f"H weights must sum to 1.0, got {h_weight_sum:.6f} "
-                f"(cv={weight_h_grad}, sim={weight_h_loss}, cluster={weight_h_acc})"
+                f"(cv={weight_cv}, sim={weight_sim}, cluster={weight_cluster})"
             )
         
-        self.w_grad = weight_h_grad
-        self.w_loss = weight_h_loss
-        self.w_acc = weight_h_acc
+        # H Score weights
+        self.weight_cv = weight_cv
+        self.weight_sim = weight_sim
+        self.weight_cluster = weight_cluster
+        
         # θ_adj parameters
         self.adjustment_factor = adjustment_factor
         self.theta_adj_clip_min = theta_adj_clip_min
@@ -99,10 +101,10 @@ class NonIIDHandler:
         self.client_histories: Dict[int, ClientHistory] = {}
         
         # Last computed H score
-        self.h_score_history: List[float] = []
+        self.last_h_score: float = 0.0
         
         print(f"✅ NonIIDHandler initialized (main.pdf spec):")
-        print(f"   H weights: Accuracy={weight_h_acc}, Gradient={weight_h_grad}, Loss={weight_h_loss}")
+        print(f"   H weights: CV={weight_cv}, sim={weight_sim}, cluster={weight_cluster}")
         print(f"   θ_adj formula: clip(θbase + (H-0.5)×{adjustment_factor}, {theta_adj_clip_min}, {theta_adj_clip_max})")
         print(f"   δi weights: norm={delta_norm_weight}, direction={delta_direction_weight}")
         print(f"   Baseline window: {baseline_window_size} rounds")
@@ -113,84 +115,64 @@ class NonIIDHandler:
     
     def compute_heterogeneity_score(
         self,
-        client_gradients: List[np.ndarray], 
-        client_losses: List[float],     
-        client_accuracies: List[float]
+        gradients: List[np.ndarray],
+        client_ids: List[int]
     ) -> float:
         """
-        Tính H-score lai tạo: Gradient + Loss CV + Accuracy CV.
+        Tính Heterogeneity Score H với robust pre-filtering.
+        
+        Formula (PDF):
+            H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+        
+        Pre-filtering: Loại 30% gradient xa median nhất để tránh bị thao túng.
+        
+        Args:
+            gradients: List of gradient arrays
+            client_ids: List of client IDs
+            
+        Returns:
+            H score trong [0, 1]
         """
+        n = len(gradients)
+        if n < 3:
+            self.last_h_score = 0.0
+            return 0.0
         
-        # 1. Component H_grad (Dựa trên Cosine Similarity - Giữ lại từ logic cũ nhưng đơn giản hơn)
-        if not client_gradients:
-            h_grad = 0.0
-        else:
-            # Flatten gradients để tính toán
-            flat_grads = [np.concatenate([arr.flatten() for arr in g]) for g in client_gradients]
-            mean_grad = np.mean(flat_grads, axis=0)
-            norm_mean = np.linalg.norm(mean_grad)
-            
-            sims = []
-            for g in flat_grads:
-                norm_g = np.linalg.norm(g)
-                if norm_g > 1e-9 and norm_mean > 1e-9:
-                    sim = np.dot(g, mean_grad) / (norm_g * norm_mean)
-                    sims.append(sim)
-                else:
-                    sims.append(0.0) # Gradient 0 coi như không giống
-            
-            # Mean sim càng thấp -> càng Non-IID. 
-            # Chuyển đổi: Sim=1 -> H=0, Sim=0 -> H=0.5, Sim=-1 -> H=1
-            avg_sim = np.mean(sims) if sims else 1.0
-            h_grad = 0.5 * (1.0 - avg_sim) # Range [0, 1]
-
-        # 2. Component H_loss (Coefficient of Variation of Loss)
-        # Ổn định ngay cả khi Loss nhỏ (hội tụ)
-        if not client_losses or len(client_losses) < 2:
-            h_loss = 0.0
-        else:
-            losses = np.array(client_losses)
-            mean_loss = np.mean(losses)
-            if mean_loss < 1e-9: # Tránh chia cho 0
-                h_loss = 0.0
-            else:
-                cv_loss = np.std(losses) / mean_loss
-                # Dùng tanh để chuẩn hóa về [0, 1], scale=1.5 để kéo dãn
-                h_loss = np.tanh(cv_loss * 1.5)
-
-        # 3. Component H_acc (Coefficient of Variation of Accuracy)
-        # Rất ổn định để đo độ khó dữ liệu
-        if not client_accuracies or len(client_accuracies) < 2:
-            h_acc = 0.0
-        else:
-            accs = np.array(client_accuracies)
-            mean_acc = np.mean(accs)
-            if mean_acc < 1e-9:
-                h_acc = 0.0
-            else:
-                cv_acc = np.std(accs) / mean_acc
-                # Acc thường lệch ít, nhân 3.0 để nhạy hơn
-                h_acc = np.tanh(cv_acc * 3.0)
-
-        # 4. Tổng hợp
-        current_H = (self.w_grad * h_grad) + (self.w_loss * h_loss) + (self.w_acc * h_acc)
+        # === ROBUST PRE-FILTERING ===
+        # Loại 30% gradient xa median nhất (vì max attack ratio = 30%)
+        grad_matrix = np.vstack([g.flatten() for g in gradients])
+        g_median = np.median(grad_matrix, axis=0)
         
-        # Clip an toàn
-        current_H = float(np.clip(current_H, 0.0, 1.0))
-
-        # EMA Smoothing (Làm mượt để threshold không nhảy loạn xạ)
-        if self.h_score_history:
-            prev_H = self.h_score_history[-1]
-            smooth_H = 0.7 * current_H + 0.3 * prev_H
-        else:
-            smooth_H = current_H
-            
-        self.h_score_history.append(smooth_H)
+        dists_to_median = np.linalg.norm(grad_matrix - g_median, axis=1)
         
-        # Debug Log chi tiết để bạn dễ theo dõi
-        print(f"   📊 H-Score Components: Grad={h_grad:.3f}, Loss={h_loss:.3f}, Acc={h_acc:.3f} -> H_final={smooth_H:.3f}")
+        keep_ratio = 0.7
+        num_keep = max(2, int(n * keep_ratio))
         
-        return smooth_H
+        sorted_indices = np.argsort(dists_to_median)
+        safe_indices = sorted_indices[:num_keep]
+        safe_grad_matrix = grad_matrix[safe_indices]
+        n_safe = len(safe_grad_matrix)
+        
+        # === TÍNH H COMPONENTS TRÊN TẬP SẠch ===
+        
+        # 1. H_CV: Coefficient of Variation của distances
+        H_CV = self._compute_h_cv(safe_grad_matrix)
+        
+        # 2. H_sim: Dissimilarity dựa trên cosine
+        H_sim = self._compute_h_sim(safe_grad_matrix)
+        
+        # 3. H_cluster: Cluster dispersion (simplified)
+        H_cluster = self._compute_h_cluster(safe_grad_matrix)
+        
+        # Combine
+        H = (self.weight_cv * H_CV + 
+             self.weight_sim * H_sim + 
+             self.weight_cluster * H_cluster)
+        
+        H = np.clip(H, 0.0, 1.0)
+        self.last_h_score = H
+        
+        return H
     
     def _compute_h_cv(self, grad_matrix: np.ndarray) -> float:
         """
@@ -537,6 +519,9 @@ class NonIIDHandler:
     def get_stats(self) -> Dict:
         """Get handler statistics."""
         return {
+            'weight_cv': self.weight_cv,
+            'weight_sim': self.weight_sim,
+            'weight_cluster': self.weight_cluster,
             'adjustment_factor': self.adjustment_factor,
             'theta_adj_clip_min': self.theta_adj_clip_min,
             'theta_adj_clip_max': self.theta_adj_clip_max,
@@ -556,3 +541,179 @@ class NonIIDHandler:
         """Reset all client histories."""
         self.client_histories.clear()
 
+
+# =============================================================================
+# TESTING
+# =============================================================================
+
+def test_noniid_handler():
+    """Test NonIIDHandler theo PDF spec."""
+    print("\n" + "="*70)
+    print("🧪 TESTING NONIID HANDLER (PDF SPEC)")
+    print("="*70)
+    
+    np.random.seed(42)
+    
+    # Initialize handler
+    handler = NonIIDHandler(
+        weight_cv=0.4,
+        weight_sim=0.4,
+        weight_cluster=0.2,
+        adjustment_factor=0.4,
+        theta_adj_clip_min=0.5,
+        theta_adj_clip_max=0.9
+    )
+    
+    # =========================================================================
+    # TEST 1: θ_adj Formula
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 1: θ_adj Formula (PDF: θbase + (H-0.5)×0.4)")
+    print("-"*70)
+    
+    test_cases = [
+        # (H, θbase, expected_θadj)
+        (0.5, 0.85, 0.85),      # H=0.5 → no adjustment
+        (0.5, 0.65, 0.65),
+        (0.7, 0.85, 0.85 + 0.2*0.4),  # H>0.5 → increase
+        (0.3, 0.85, 0.85 - 0.2*0.4),  # H<0.5 → decrease
+        (1.0, 0.85, 0.9),       # H=1.0 → max clip
+        (0.0, 0.85, 0.65),      # H=0.0 → θbase - 0.2
+        (0.0, 0.5, 0.5),        # Min clip
+    ]
+    
+    all_pass = True
+    for H, theta_base, expected in test_cases:
+        result = handler.compute_adaptive_threshold(H, theta_base)
+        expected_clipped = np.clip(expected, 0.5, 0.9)
+        passed = abs(result - expected_clipped) < 1e-6
+        status = "✅" if passed else "❌"
+        print(f"   {status} H={H:.1f}, θbase={theta_base:.2f} → θadj={result:.3f} (expected: {expected_clipped:.3f})")
+        if not passed:
+            all_pass = False
+    
+    # =========================================================================
+    # TEST 2: H Score
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 2: H Score Computation")
+    print("-"*70)
+    
+    # IID data: similar gradients
+    iid_grads = [np.random.randn(1000) * 0.1 + np.ones(1000) for _ in range(20)]
+    H_iid = handler.compute_heterogeneity_score(iid_grads, list(range(20)))
+    print(f"   IID gradients (similar):     H = {H_iid:.3f} (expected: low, < 0.3)")
+    
+    # Non-IID data: diverse gradients
+    noniid_grads = [np.random.randn(1000) * i * 0.5 for i in range(1, 21)]
+    H_noniid = handler.compute_heterogeneity_score(noniid_grads, list(range(20)))
+    print(f"   Non-IID gradients (diverse): H = {H_noniid:.3f} (expected: high, > 0.4)")
+    
+    if H_iid < H_noniid:
+        print(f"   ✅ H_iid < H_noniid: Correct ordering")
+    else:
+        print(f"   ❌ H_iid >= H_noniid: Wrong ordering")
+        all_pass = False
+    
+    # =========================================================================
+    # TEST 3: Baseline Deviation δi
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 3: Baseline Deviation δi")
+    print("-"*70)
+    
+    handler2 = NonIIDHandler()
+    
+    # Simulate consistent client
+    base_grad = np.random.randn(1000)
+    for i in range(10):
+        noisy_grad = base_grad + np.random.randn(1000) * 0.01
+        handler2.update_client_gradient(client_id=1, gradient=noisy_grad)
+    
+    # Test δi for similar gradient
+    similar_grad = base_grad + np.random.randn(1000) * 0.01
+    delta_similar = handler2.compute_baseline_deviation(1, similar_grad)
+    print(f"   Similar gradient: δi = {delta_similar:.3f} (expected: low, < 0.2)")
+    
+    # Test δi for different gradient
+    different_grad = -base_grad * 2  # Opposite direction, different magnitude
+    delta_different = handler2.compute_baseline_deviation(1, different_grad)
+    print(f"   Different gradient: δi = {delta_different:.3f} (expected: high, > 0.5)")
+    
+    if delta_similar < delta_different:
+        print(f"   ✅ δ_similar < δ_different: Correct ordering")
+    else:
+        print(f"   ❌ δ_similar >= δ_different: Wrong ordering")
+        all_pass = False
+    
+    # =========================================================================
+    # TEST 4: Detailed Deviation
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 4: Detailed Baseline Deviation")
+    print("-"*70)
+    
+    grad_median = np.median(np.vstack([base_grad, similar_grad]), axis=0)
+    detail = handler2.compute_baseline_deviation_detailed(1, different_grad, grad_median)
+    print(f"   δ_norm:      {detail['delta_norm']:.3f}")
+    print(f"   δ_direction: {detail['delta_direction']:.3f}")
+    print(f"   δ_combined:  {detail['delta_combined']:.3f}")
+    
+    if detail['delta_combined'] == (0.5 * detail['delta_norm'] + 0.5 * detail['delta_direction']):
+        print(f"   ✅ Combined formula correct")
+    else:
+        print(f"   ❌ Combined formula wrong")
+        all_pass = False
+    
+    # =========================================================================
+    # TEST 5: Edge Cases
+    # =========================================================================
+    print("\n" + "-"*70)
+    print("TEST 5: Edge Cases")
+    print("-"*70)
+    
+    handler3 = NonIIDHandler()
+    
+    # New client (no history)
+    delta_new = handler3.compute_baseline_deviation(999, np.random.randn(1000))
+    print(f"   New client (no history): δi = {delta_new:.3f} (expected: 0.0)")
+    if delta_new == 0.0:
+        print(f"   ✅ Correct")
+    else:
+        print(f"   ❌ Wrong")
+        all_pass = False
+    
+    # Client with 1 sample (not enough for std)
+    handler3.update_client_gradient(998, np.random.randn(1000))
+    delta_one = handler3.compute_baseline_deviation(998, np.random.randn(1000))
+    print(f"   Client with 1 sample: δi = {delta_one:.3f} (expected: 0.0)")
+    if delta_one == 0.0:
+        print(f"   ✅ Correct")
+    else:
+        print(f"   ❌ Wrong")
+        all_pass = False
+    
+    # Very few gradients for H
+    H_few = handler3.compute_heterogeneity_score([np.ones(100)], [0])
+    print(f"   H with 1 gradient: H = {H_few:.3f} (expected: 0.0)")
+    if H_few == 0.0:
+        print(f"   ✅ Correct")
+    else:
+        print(f"   ❌ Wrong")
+        all_pass = False
+    
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    print("\n" + "="*70)
+    if all_pass:
+        print("✅ ALL TESTS PASSED!")
+    else:
+        print("❌ SOME TESTS FAILED")
+    print("="*70 + "\n")
+    
+    return all_pass
+
+
+if __name__ == "__main__":
+    test_noniid_handler()

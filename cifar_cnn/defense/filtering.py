@@ -180,32 +180,21 @@ class TwoStageFilter:
         for cid in remaining:
             ci = confidence_scores.get(cid, 0.0)
             R = reputations.get(cid, 0.8)  # Default R = 0.8 nếu chưa có
-            if ci > theta_soft:
-                soft_filtered.add(cid)
-                continue
+            
             # Điều kiện lọc mềm: PHẢI thỏa cả 2
             # 1. ci > θ_soft (có điểm nghi ngờ)
             # 2. R < τ_mode (uy tín thấp theo mode)
-            if ci > theta_soft * 0.5 and R < tau_mode:
+            if ci > theta_soft and R < tau_mode:
                 soft_filtered.add(cid)
         
-        # print(f"\n   🟡 Soft Filter (ci > {theta_soft:.3f} AND R < {tau_mode:.2f}):")
-        # print(f"      Filtered: {len(soft_filtered)} clients")
-        # if soft_filtered and len(soft_filtered) <= 10:
-        #     for cid in soft_filtered:
-        #         ci = confidence_scores.get(cid, 0)
-        #         R = reputations.get(cid, 0.8)
-        #         print(f"         Client {cid}: ci={ci:.3f}, R={R:.3f}")
-        print(f"\n   🟡 Soft Filter (TIERED - ci>{theta_soft:.3f} OR [R<{tau_mode:.2f} AND ci>{theta_soft*0.5:.3f}]):")
+        print(f"\n   🟡 Soft Filter (ci > {theta_soft:.3f} AND R < {tau_mode:.2f}):")
         print(f"      Filtered: {len(soft_filtered)} clients")
         if soft_filtered and len(soft_filtered) <= 10:
             for cid in soft_filtered:
                 ci = confidence_scores.get(cid, 0)
                 R = reputations.get(cid, 0.8)
-                # Determine which tier triggered
-                tier = "Tier 1 (ci)" if ci > theta_soft else "Tier 2 (R+ci)"
-                print(f"         Client {cid}: ci={ci:.3f}, R={R:.3f} [{tier}]")
- 
+                print(f"         Client {cid}: ci={ci:.3f}, R={R:.3f}")
+        
         # =========================================================
         # STEP 4: Tập tin cậy cuối cùng
         # =========================================================
