@@ -31,7 +31,6 @@ MA TRẬN QUYẾT ĐỊNH (Giai đoạn 3 trong PDF):
 └─────────────┴──────────────┴─────────────┴──────────────────────┘
 """
 
-from http.client import ACCEPTED
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from enum import Enum
@@ -231,7 +230,7 @@ class Layer2Detector:
 
             # Áp dụng ma trận quyết định
             result, suspicion = self._apply_decision_matrix(
-                layer1_status, fail_cosine, fail_distance, can_rescue, dist, distance_threshold, cos
+                layer1_status, fail_cosine, fail_distance, can_rescue
             )
             if self.enable_drift_detection and result == Layer2Result.ACCEPTED:
                 is_drifting, drift_dir = self._detect_drift(cid)
@@ -412,10 +411,7 @@ class Layer2Detector:
         layer1_status: str,
         fail_cosine: bool,
         fail_distance: bool,
-        can_rescue: bool,
-        distance: float,          
-        distance_threshold: float,   
-        cosine: float 
+        can_rescue: bool
     ) -> Tuple[Layer2Result, Optional[SuspicionLevel]]:
         """
         Áp dụng ma trận quyết định
@@ -439,14 +435,7 @@ class Layer2Detector:
         # L1 ACCEPTED + Cosine OK
         if fail_distance:
             # Distance lớn nhưng hướng đúng → nghi ngờ
-            extreme_distance = distance > 2.0 * distance_threshold
-            marginal_cosine = cosine < 0.85
-            
-            if extreme_distance and marginal_cosine:
-                return Layer2Result.REJECTED, None  
-            else:
-                return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
-
+            return Layer2Result.ACCEPTED, SuspicionLevel.SUSPICIOUS
         
         # L1 ACCEPTED + Cosine OK + Distance OK → Hoàn toàn sạch
         return Layer2Result.ACCEPTED, SuspicionLevel.CLEAN

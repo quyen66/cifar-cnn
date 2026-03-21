@@ -77,3 +77,9 @@ __all__ = [
 ]
 
 __version__ = '2.1.0'
+
+print(f"✅ Attacks module loaded: v{__version__}")
+print(f"   Nhóm 1 (Thô):      RandomNoise, GaussianNoise, SignFlip")
+print(f"   Nhóm 2 (Tinh vi):  LabelFlip, Backdoor")
+print(f"   Nhóm 3 (Thống kê): MinMax, MinSum")
+print(f"   Nhóm 4 (Thích ứng): OnOff, SlowPoison [NEW]")
