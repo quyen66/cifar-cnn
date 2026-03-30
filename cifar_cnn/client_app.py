@@ -70,11 +70,17 @@ class FlowerClient(NumPyClient):
         is_malicious_flag = 0
         if self.__class__.__name__ != "FlowerClient":
              is_malicious_flag = 1
-             
+
+        # Tính train_accuracy bằng cách chạy test() trên trainloader
+        # Dùng trainloader (không phải testloader) để phản ánh local data distribution
+        # → BehavioralScorer dùng CV(train_accuracy) để detect behavioral divergence
+        _, train_accuracy = test(self.net, self.trainloader, self.device)
+
         metrics = {
-            "train_loss": float(train_loss["train_loss"]),  # Convert to Python float
-            "is_malicious": int(is_malicious_flag),  # Convert to Python int
-            "partition_id": int(self.partition_id) if self.partition_id is not None else 0  # Convert to Python int
+            "train_loss": float(train_loss["train_loss"]),
+            "train_accuracy": float(train_accuracy),   # BehavioralScorer cần field này
+            "is_malicious": int(is_malicious_flag),
+            "partition_id": int(self.partition_id) if self.partition_id is not None else 0
         }
         
         return get_parameters(self.net), len(self.trainloader.dataset), metrics
@@ -140,15 +146,23 @@ def client_fn(context: Context) -> Client:
     # Tạo wrapper function để inject partition_id vào metrics
     
     def create_attack_client_with_partition_id(attack_client_class, **kwargs):
-        """Helper to create attack client with partition_id in metrics."""
+        """Helper to create attack client with partition_id + train_accuracy in metrics."""
         client = attack_client_class(**kwargs)
         original_fit = client.fit
-        
+
         def wrapped_fit(parameters, config):
             params, num_examples, metrics = original_fit(parameters, config)
-            metrics["partition_id"] = int(partition_id)  # Ensure Python int
+            metrics["partition_id"] = int(partition_id)
+            # Thêm train_accuracy nếu attack client chưa trả về
+            # BehavioralScorer cần field này để tính CV(accuracy)
+            if "train_accuracy" not in metrics:
+                try:
+                    _, train_acc = test(client.net, client.trainloader, client.device)
+                    metrics["train_accuracy"] = float(train_acc)
+                except Exception:
+                    metrics["train_accuracy"] = 0.0
             return params, num_examples, metrics
-        
+
         client.fit = wrapped_fit
         return client
     

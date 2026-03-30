@@ -103,9 +103,9 @@ class NonIIDHandler:
         # Last computed H score
         self.last_h_score: float = 0.0
         
-        print(f"✅ NonIIDHandler initialized (main.pdf spec):")
-        print(f"   H weights: CV={weight_cv}, sim={weight_sim}, cluster={weight_cluster}")
-        print(f"   θ_adj formula: clip(θbase + (H-0.5)×{adjustment_factor}, {theta_adj_clip_min}, {theta_adj_clip_max})")
+        print(f"✅ NonIIDHandler initialized (GDS — Gradient Dispersion Score):")
+        print(f"   GDS weights: CV={weight_cv}, sim={weight_sim}, cluster={weight_cluster}")
+        print(f"   θ_adj formula: clip(θbase + (0.5 - θ_signal) × {adjustment_factor}, {theta_adj_clip_min}, {theta_adj_clip_max})")
         print(f"   δi weights: norm={delta_norm_weight}, direction={delta_direction_weight}")
         print(f"   Baseline window: {baseline_window_size} rounds")
 
@@ -153,25 +153,32 @@ class NonIIDHandler:
         safe_grad_matrix = grad_matrix[safe_indices]
         n_safe = len(safe_grad_matrix)
         
-        # === TÍNH H COMPONENTS TRÊN TẬP SẠch ===
-        
-        # 1. H_CV: Coefficient of Variation của distances
+        # === TÍNH GDS COMPONENTS TRÊN TẬP SẠch ===
+
+        # 1. D_CV: Coefficient of Variation của pairwise distances
         H_CV = self._compute_h_cv(safe_grad_matrix)
-        
-        # 2. H_sim: Dissimilarity dựa trên cosine
+
+        # 2. D_sim: Cosine dissimilarity
         H_sim = self._compute_h_sim(safe_grad_matrix)
-        
-        # 3. H_cluster: Cluster dispersion (simplified)
+
+        # 3. D_cluster: Cluster dispersion
         H_cluster = self._compute_h_cluster(safe_grad_matrix)
-        
+
         # Combine
-        H = (self.weight_cv * H_CV + 
-             self.weight_sim * H_sim + 
+        H = (self.weight_cv * H_CV +
+             self.weight_sim * H_sim +
              self.weight_cluster * H_cluster)
-        
+
         H = np.clip(H, 0.0, 1.0)
         self.last_h_score = H
-        
+
+        # Log GDS với component breakdown (compact, 1 dòng)
+        print(f"   🔢 GDS={H:.4f}  "
+              f"(D_CV={H_CV:.3f}×{self.weight_cv}  "
+              f"D_sim={H_sim:.3f}×{self.weight_sim}  "
+              f"D_cluster={H_cluster:.3f}×{self.weight_cluster}  "
+              f"| n_safe={n_safe}/{n})")
+
         return H
     
     def _compute_h_cv(self, grad_matrix: np.ndarray) -> float:
@@ -507,9 +514,25 @@ class NonIIDHandler:
     # =========================================================================
     
     def get_last_h_score(self) -> float:
-        """Get last computed H score."""
+        """Get last computed score (GDS). Alias kept for backward compat."""
         return self.last_h_score
-    
+
+    def get_last_gds(self) -> float:
+        """Get last computed GDS score (same as last_h_score)."""
+        return self.last_h_score
+
+    def compute_gds(
+        self,
+        gradients: List[np.ndarray],
+        client_ids: List[int]
+    ) -> float:
+        """
+        Alias của compute_heterogeneity_score() với tên rõ nghĩa hơn.
+        GDS = w_cv × D_CV + w_sim × D_sim + w_cluster × D_cluster
+        Đo sự phân tán hình học gradient → proxy cho môi trường non-IID.
+        """
+        return self.compute_heterogeneity_score(gradients, client_ids)
+
     def get_client_history_length(self, client_id: int) -> int:
         """Get number of rounds tracked for a client."""
         if client_id not in self.client_histories:
@@ -540,6 +563,150 @@ class NonIIDHandler:
     def reset_all_histories(self):
         """Reset all client histories."""
         self.client_histories.clear()
+
+
+
+# =============================================================================
+# BehavioralScorer — Behavioral Heterogeneity Score (H)
+# =============================================================================
+
+class BehavioralScorer:
+    """
+    Tính Behavioral Heterogeneity Score (H) từ gradient direction,
+    loss, và accuracy của các clients trong round hiện tại.
+
+    H = w_grad × h_grad + w_loss × h_loss + w_acc × h_acc
+
+    Khác với GDS (NonIIDHandler):
+      - GDS đo gradient geometry → proxy cho non-IID environment
+      - H  đo behavioral divergence (gradient direction + loss + accuracy)
+            → phản ánh threat level, detect được ALIE qua CV(loss)/CV(acc)
+
+    Vai trò trong pipeline:
+      - Variant A (θ_adj theo H):   dùng H cho cả filter threshold VÀ mode/reputation
+      - Variant B (θ_adj theo GDS): dùng H cho mode/reputation, GDS cho filter threshold
+    """
+
+    def __init__(
+        self,
+        # H weights — phải sum = 1.0
+        weight_grad: float = 0.4,   # Gradient direction divergence
+        weight_loss: float = 0.3,   # Loss CV
+        weight_acc:  float = 0.3,   # Accuracy CV
+    ):
+        h_sum = weight_grad + weight_loss + weight_acc
+        if abs(h_sum - 1.0) > 1e-6:
+            raise ValueError(
+                f"H weights must sum to 1.0, got {h_sum:.6f} "
+                f"(grad={weight_grad}, loss={weight_loss}, acc={weight_acc})"
+            )
+        self.w_grad = weight_grad
+        self.w_loss = weight_loss
+        self.w_acc  = weight_acc
+        self.last_h_score: float = 0.0
+
+        print(f"✅ BehavioralScorer initialized:")
+        print(f"   H weights: grad={weight_grad}, loss={weight_loss}, acc={weight_acc}")
+
+    def compute_h_score(
+        self,
+        gradients: List[np.ndarray],
+        losses: Optional[List[float]] = None,
+        accuracies: Optional[List[float]] = None
+    ) -> float:
+        """
+        Tính H = w_grad × h_grad + w_loss × h_loss + w_acc × h_acc.
+
+        Args:
+            gradients:   Gradient arrays từ round hiện tại
+            losses:      Local training losses từ client metrics (có thể None)
+            accuracies:  Local training accuracies từ client metrics (có thể None)
+
+        Returns:
+            H score ∈ [0, 1]
+        """
+        n = len(gradients)
+        if n < 2:
+            self.last_h_score = 0.0
+            return 0.0
+
+        h_grad = self._compute_h_grad(gradients)
+        h_loss = self._compute_h_cv_metric(losses, scale=0.5) if losses and len(losses) == n else 0.0
+        h_acc  = self._compute_h_cv_metric(accuracies, scale=2.0) if accuracies and len(accuracies) == n else 0.0
+
+        H = float(np.clip(
+            self.w_grad * h_grad + self.w_loss * h_loss + self.w_acc * h_acc,
+            0.0, 1.0
+        ))
+        self.last_h_score = H
+        return H
+
+    def _compute_h_grad(self, gradients: List[np.ndarray]) -> float:
+        """
+        h_grad: Mean pairwise cosine divergence = (1 - cosine_sim) / 2.
+        Đo sự phân kỳ hướng gradient giữa các clients.
+        """
+        n = len(gradients)
+        if n < 2:
+            return 0.0
+        # Normalize
+        g_norm = []
+        for g in gradients:
+            gf = g.flatten()
+            norm = np.linalg.norm(gf)
+            g_norm.append(gf / norm if norm > 1e-9 else np.zeros_like(gf))
+        # Pairwise cosine divergence
+        divs = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                cos = float(np.clip(np.dot(g_norm[i], g_norm[j]), -1.0, 1.0))
+                divs.append((1.0 - cos) / 2.0)  # ∈ [0, 1]
+        return float(np.mean(divs)) if divs else 0.0
+
+    def _compute_h_cv_metric(self, values: List[float], scale: float = 1.0) -> float:
+        """
+        Tính normalized CV của một metric (loss hoặc accuracy).
+        scale: hệ số điều chỉnh để đưa CV về [0, 1]:
+          - loss: scale=0.5  (CV loss thường 0–2 → × 0.5 → 0–1)
+          - acc:  scale=2.0  (CV acc thường 0–0.5 → × 2.0 → 0–1)
+        """
+        if not values or len(values) < 2:
+            return 0.0
+        arr = np.array(values, dtype=float)
+        mean_val = np.mean(arr)
+        if mean_val < 1e-8:
+            return 0.0
+        cv = np.std(arr) / mean_val
+        return float(min(1.0, cv * scale))
+
+    def get_breakdown(
+        self,
+        gradients: List[np.ndarray],
+        losses: Optional[List[float]] = None,
+        accuracies: Optional[List[float]] = None
+    ) -> Dict[str, float]:
+        """Tính H và trả về breakdown từng component — dùng cho logging."""
+        n = len(gradients)
+        if n < 2:
+            return {'h_grad': 0.0, 'h_loss': 0.0, 'h_acc': 0.0, 'H': 0.0}
+        h_grad = self._compute_h_grad(gradients)
+        h_loss = self._compute_h_cv_metric(losses, 0.5) if losses and len(losses) == n else 0.0
+        h_acc  = self._compute_h_cv_metric(accuracies, 2.0) if accuracies and len(accuracies) == n else 0.0
+        H = float(np.clip(self.w_grad * h_grad + self.w_loss * h_loss + self.w_acc * h_acc, 0.0, 1.0))
+        self.last_h_score = H
+
+        # Log H với component breakdown (compact, 1 dòng)
+        loss_note = f"n={len(losses)}" if losses and len(losses) == n else "N/A (fallback)"
+        acc_note  = f"n={len(accuracies)}" if accuracies and len(accuracies) == n else "N/A (fallback)"
+        print(f"   🔢 H={H:.4f}  "
+              f"(h_grad={h_grad:.3f}×{self.w_grad}  "
+              f"h_loss={h_loss:.3f}×{self.w_loss} [{loss_note}]  "
+              f"h_acc={h_acc:.3f}×{self.w_acc} [{acc_note}])")
+
+        return {'h_grad': h_grad, 'h_loss': h_loss, 'h_acc': h_acc, 'H': H}
+
+    def get_last_h_score(self) -> float:
+        return self.last_h_score
 
 
 # =============================================================================

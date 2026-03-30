@@ -1,10 +1,15 @@
 """
 Server Application - Trusted Warm-up & Adaptive Defense (V2 - Soft Pipeline)
 =============================================================================
-FULL PRODUCTION VERSION with WARMUP BUG FIX:
-- FIX: Warmup trusted client selection bug (seq_id vs partition_id mismatch)
-- Added detailed debug logging
-- Added Adaptive Hybrid Reference
+⚗️  EXPERIMENT VARIANT B: θ_adj theo GDS (Gradient Dispersion Score)
+    - GDS  = gradient geometry dispersion  → dùng cho:
+             * θ_adj (filter threshold)
+             * adaptive reference weight
+    - H    = behavioral divergence (grad direction + loss + acc) → dùng cho:
+             * mode controller threat level
+             * reputation penalty multiplier
+    So sánh với Variant A (θ_adj theo H).
+=============================================================================
 """
 
 import numpy as np
@@ -40,6 +45,8 @@ from cifar_cnn.defense import (
     ModeController,
     Aggregator           
 )
+# BehavioralScorer nằm trong noniid_handler.py
+from cifar_cnn.defense.noniid_handler import BehavioralScorer
 from cifar_cnn.defense.reputation import ClientStatus 
 from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker 
 
@@ -114,6 +121,8 @@ class FullPipelineStrategy(FedProx):
         self.layer1_detector = Layer1Detector(**self.defense_params.get('layer1', {}))
         self.layer2_detector = Layer2Detector(**self.defense_params.get('layer2', {}))
         self.noniid_handler = NonIIDHandler(**self.defense_params.get('noniid', {}))
+        # VARIANT B: BehavioralScorer tính H → dùng cho mode + reputation (KHÔNG cho θ_adj)
+        self.behavioral_scorer = BehavioralScorer(**self.defense_params.get('behavioral', {}))
         self.confidence_scorer = ConfidenceScorer(**self.defense_params.get('confidence', {}), 
                                                   rescued_penalty=self.defense_params.get('confidence', {}).get('rescued_penalty', 0.3),
                                                   rescued_suspicious_penalty=self.defense_params.get('confidence', {}).get('rescued-suspicious-penalty', 0.7),
@@ -351,8 +360,9 @@ class FullPipelineStrategy(FedProx):
                 self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
             
             print(f"   ✅ Warmup aggregation successful with {len(trusted_grads)} trusted clients")
-            print(f"   Heterogeneity Score H = 0.000 (Warmup)") 
-            self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0)
+            # Warmup: chưa có attacker nên GDS và H đều = 0
+            print(f"   GDS=0.000 (Warmup) | H=0.000 (Warmup)")
+            self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0, 0.0)
             if should_save: self._save_checkpoint(server_round)
             return self.current_parameters, {}
 
@@ -397,41 +407,67 @@ class FullPipelineStrategy(FedProx):
         num_mal = sum(gt_malicious_batch)
         print(f"   🔍 [DEBUG] Ground Truth from Metrics: {num_mal} attackers in batch.")
         
-        # === Tính H score TRƯỚC để dùng cho adaptive reference ===
+        # ═══════════════════════════════════════════════════════════════
+        # ⚗️  VARIANT B: θ_adj theo GDS (Gradient Dispersion Score)
+        # ═══════════════════════════════════════════════════════════════
+
+        # === Bước 1: Update client gradient history ===
         for local_idx, seq_id in enumerate(seq_cids):
             self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
-        
-        H_early = self.noniid_handler.compute_heterogeneity_score(full_gradients, seq_cids)
-        
-        # === Tính Adaptive Reference ===
+
+        # === Bước 2: Tính GDS (Gradient Dispersion Score) ===
+        # GDS đo sự phân tán hình học gradient → proxy môi trường non-IID
+        # → dùng cho θ_adj (filter threshold) + adaptive reference
+        GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids)
+
+        # === Bước 3: Tính H (Behavioral Heterogeneity Score) ===
+        # H đo divergence hành vi (gradient direction + loss + accuracy)
+        # → dùng cho mode controller, reputation penalty
+        losses_batch = [float(res.metrics["train_loss"])
+                        for _, res in results if "train_loss" in res.metrics]
+        accs_batch   = [float(res.metrics["train_accuracy"])
+                        for _, res in results if "train_accuracy" in res.metrics]
+        h_breakdown = self.behavioral_scorer.get_breakdown(
+            full_gradients,
+            losses=losses_batch if len(losses_batch) == len(full_gradients) else None,
+            accuracies=accs_batch if len(accs_batch) == len(full_gradients) else None
+        )
+        H = h_breakdown['H']
+        # Lưu breakdown để dùng trong _calculate_metrics
+        self._last_h_breakdown = h_breakdown
+
+        # VARIANT B: theta_signal = GDS (dispersion) → điều chỉnh θ_adj
+        theta_signal = GDS
+
+        print(f"\n   📊 [VARIANT B] GDS={GDS:.4f} | H={H:.4f} | θ_adj signal=GDS")
+        print(f"      h_grad={h_breakdown['h_grad']:.3f}  h_loss={h_breakdown['h_loss']:.3f}  h_acc={h_breakdown['h_acc']:.3f}")
+        if not losses_batch or len(losses_batch) != len(full_gradients):
+            print(f"      ⚠️  train_loss not in client metrics → h_loss=0 (fallback)")
+
+        # === Bước 4: Adaptive Reference dùng GDS (gradient environment) ===
         if hasattr(self, 'adaptive_ref_tracker'):
             reference_vector = self.adaptive_ref_tracker.compute_adaptive_reference(
-                full_gradients, 
-                h_score=H_early, 
+                full_gradients,
+                h_score=GDS,        # GDS phản ánh gradient environment
                 current_round=server_round
             )
         else:
             reference_vector = np.median(np.vstack(full_gradients), axis=0)
             print("   🛡️  Using Current Round Coordinate Median as Reference")
-        
+
         # 1. Detection Layers
         l1_res = self.layer1_detector.detect(full_gradients, seq_cids, current_round=server_round, is_malicious_ground_truth=gt_malicious_batch)
-        
+
         l2_status, l2_suspicion = self.layer2_detector.detect(
-            full_gradients, 
-            seq_cids, 
-            l1_res, 
-            current_round=server_round, 
-            is_malicious_ground_truth=gt_malicious_batch, 
+            full_gradients,
+            seq_cids,
+            l1_res,
+            current_round=server_round,
+            is_malicious_ground_truth=gt_malicious_batch,
             external_reference=reference_vector
         )
 
-        # 2. Non-IID Handler: Calculate H Score
-        for local_idx, seq_id in enumerate(seq_cids):
-            self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
-        
-        H = H_early  # Sử dụng H đã tính trước đó
-        print(f"\n   🌐 Heterogeneity Score H = {H:.4f}")
+        # 2. H đã tính ở Bước 3 — không cần tính lại
         
         # 3. Confidence Scoring - Use correct method calculate_scores
         baseline_deviations = {}
@@ -555,28 +591,34 @@ class FullPipelineStrategy(FedProx):
         print(f"{'─'*82}\n")
         
         current_mode = self.mode_controller.get_current_mode()
-        
+
+        # Build gt_malicious dict để filtering.py có thể in GT cho từng client
+        gt_mal_dict = {seq_cids[i]: gt_malicious_batch[i] for i in range(len(seq_cids))}
+
         trusted_set, all_filtered, filter_stats = self.two_stage_filter.filter_clients(
             client_ids=seq_cids,
             confidence_scores=confidence_scores,
             reputations=reputations,
             mode=current_mode,
-            H=H,
-            noniid_handler=self.noniid_handler
+            H=theta_signal,         # VARIANT B: theta_signal = GDS (dispersion)
+            noniid_handler=self.noniid_handler,
+            gt_malicious=gt_mal_dict   # Ground truth để debug
         )
-        
+
         hard_filtered = set(filter_stats.get('hard_filtered_ids', []))
         soft_filtered = set(filter_stats.get('soft_filtered_ids', []))
-        
-        detection_rejected = {seq_id for seq_id in seq_cids 
+
+        detection_rejected = {seq_id for seq_id in seq_cids
                              if client_statuses.get(seq_id) == ClientStatus.REJECTED}
         all_filtered = all_filtered | detection_rejected  # Union 2 sets
-        
-        print(f"\n   🔒 Two-Stage Filter (Mode={current_mode}):")
-        print(f"      Hard Filter: {len(hard_filtered)} rejected")
-        print(f"      Soft Filter: {len(soft_filtered)} rejected")
-        print(f"      Detection Rejected (L1+L2): {len(detection_rejected)}")
-        print(f"      Total Filtered: {len(all_filtered)}")
+
+        # Summary sau khi union với detection_rejected
+        print(f"\n   🔒 Two-Stage Filter + Detection (Mode={current_mode}):")
+        print(f"      Hard Filter:              {len(hard_filtered):3d} clients")
+        print(f"      Soft Filter:              {len(soft_filtered):3d} clients")
+        print(f"      Detection Rejected (L1+L2):{len(detection_rejected):3d} clients")
+        print(f"      ─────────────────────────────")
+        print(f"      Total Filtered:           {len(all_filtered):3d} / {len(seq_cids)} clients")
         
         # 6. Mode Controller Update - Use update_mode with correct signature
         threat_ratio = len(all_filtered) / len(seq_cids) if seq_cids else 0
@@ -630,7 +672,8 @@ class FullPipelineStrategy(FedProx):
             seq_cids, 
             gt_malicious_batch, 
             all_filtered,
-            H, 
+            H,
+            GDS,
             threat_ratio,
             time.time() - start_time
         )
@@ -669,13 +712,14 @@ class FullPipelineStrategy(FedProx):
         # Cập nhật tham số toàn cục mới
         self.current_parameters = ndarrays_to_parameters(new_params)
         
-    def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, threat_ratio, elapsed):
+    def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, GDS, threat_ratio, elapsed):
         """
         Calculate and print detection metrics.
-        
+
         Output includes:
         - Human-readable metrics (Precision, Recall, F1, FPR as percentages)
         - Machine-parseable summary line for automation scripts
+        - GDS and H scores with component breakdown
         """
         if not seq_cids:
             print(f"\n📊 METRICS ROUND {server_round}")
@@ -718,8 +762,16 @@ class FullPipelineStrategy(FedProx):
         
         # 🆕 Machine-parseable summary line (for run_param_tests.py)
         print(f"   [METRICS] Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}, FPR={fpr:.4f}")
-        
-        print(f"   H={H:.4f}, Threat Ratio={threat_ratio:.2%}")
+
+        # GDS và H score — in rõ nguồn gốc và component breakdown
+        print(f"   H={H:.4f}, GDS={GDS:.4f}, Threat Ratio={threat_ratio:.2%}")
+        if hasattr(self, '_last_h_breakdown'):
+            bd = self._last_h_breakdown
+            print(f"   H_breakdown: h_grad={bd['h_grad']:.3f}  "
+                  f"h_loss={bd['h_loss']:.3f}  "
+                  f"h_acc={bd['h_acc']:.3f}")
+        # Machine-parseable scores line cho automation scripts
+        print(f"   [SCORES] H={H:.4f}, GDS={GDS:.4f}, ThreatRatio={threat_ratio:.4f}")
         print(f"   Time: {elapsed:.2f}s")
         
         mal_indices = [i for i, m in enumerate(gt_malicious) if m]
@@ -797,6 +849,12 @@ def server_fn(context: Context) -> ServerAppComponents:
             'baseline_window_size': int(context.run_config.get("defense.noniid.baseline-window-size", 10)),
             'delta_norm_weight': float(context.run_config.get("defense.noniid.delta-norm-weight", 0.5)),
             'delta_direction_weight': float(context.run_config.get("defense.noniid.delta-direction-weight", 0.5))
+        }
+        # BehavioralScorer params — dùng cho H (behavioral heterogeneity score)
+        defense_params['behavioral'] = {
+            'weight_grad': float(context.run_config.get("defense.behavioral.weight-grad", 0.4)),
+            'weight_loss': float(context.run_config.get("defense.behavioral.weight-loss", 0.3)),
+            'weight_acc':  float(context.run_config.get("defense.behavioral.weight-acc",  0.3)),
         }
         defense_params['confidence'] = {
             'weight_flagged': float(context.run_config.get("defense.confidence.weight-flagged", 0.4)),

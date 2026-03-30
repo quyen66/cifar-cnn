@@ -51,7 +51,7 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/Cfg1_cluster_emphasis/backdoor"
+save-dir = "saved_models/MADcfg9_moderate_reject/alie"
 save-interval = 10
 resume-from = ""
 
@@ -62,7 +62,7 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "backdoor" 
+attack-type = "alie" 
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
@@ -82,7 +82,7 @@ backdoor-pattern-size = 3   # Kích thước vùng trigger
 backdoor-scaling-factor = 1.0
 
 # 6. ALIE (A Little Is Enough)
-alie-z = 1.5              # Hệ số z 
+alie-z = 2.0        # Hệ số z 
 
 # 7. Min-Max
 minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
@@ -162,8 +162,8 @@ min-history-rounds = 10     # Số round tối thiểu để dùng historical
 pca-dims = 20
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 1.5
-mad-k-reject = 10.0
-mad-k-flag = 4.0
+mad-k-reject = 4.5
+mad-k-flag = 3.0
 voting-threshold = 3
 zero-cluster-action = "accept_all"
 
@@ -189,10 +189,10 @@ require-distance-pass = true
 # =====================================================================
 [tool.flwr.app.config.defense.noniid]
 
-# H Score weights (must sum to 1.0)
-weight-cv = 0.4
-weight-sim = 0.4
-weight-cluster = 0.2
+# GDS weights (must sum to 1.0)
+weight-cv = 0.1
+weight-sim = 0.1
+weight-cluster = 0.8
 
 # θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
 adjustment-factor = 0.2
@@ -208,6 +208,28 @@ delta-direction-weight = 0.5
 
 # EMA decay cho running mean gradient
 grad-ema-decay = 0.3
+
+#=====================================================================
+# BEHAVIORAL SCORER — Behavioral Heterogeneity Score (H)
+# =====================================================================
+# H = w_grad × h_grad + w_loss × h_loss + w_acc × h_acc
+#
+# h_grad: mean pairwise cosine divergence giữa gradient vectors
+# h_loss: normalized CV của local training losses   (detect ALIE)
+# h_acc:  normalized CV của local training accuracies (detect ALIE)
+#
+# Variant A: H → θ_adj + mode controller + reputation penalty
+# Variant B: H → mode controller + reputation penalty only
+#
+# Lưu ý: cần client trả về train_loss và train_accuracy trong metrics.
+#   Nếu không có → h_loss = h_acc = 0, H chỉ dùng h_grad (vẫn chạy).
+# =====================================================================
+[tool.flwr.app.config.defense.behavioral]
+ 
+# H weights (must sum to 1.0)
+weight-grad = 0.4   # Gradient direction divergence
+weight-loss = 0.3   # CV of local training losses
+weight-acc  = 0.3   # CV of local training accuracies
 
 # =====================================================================
 # CONFIDENCE SCORING 
@@ -243,10 +265,10 @@ rescued_euclidean = 0.5
 
 # Ngưỡng cơ sở (θ_base)
 hard-threshold-base = 0.7
-soft-threshold-base = 0.4
+soft-threshold-base = 0.08
 
 # τ_mode - ngưỡng reputation theo mode
-soft-rep-threshold-normal = 0.6
+soft-rep-threshold-normal = 0.4
 soft-rep-threshold-alert = 0.7
 soft-rep-threshold-defense = 0.8
 

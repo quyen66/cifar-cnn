@@ -118,90 +118,109 @@ class TwoStageFilter:
         confidence_scores: Dict[int, float],
         reputations: Dict[int, float],
         mode: str,
-        H: float,
-        noniid_handler: "NonIIDHandler"
+        H: float,                            # theta_signal: GDS (Variant B) hoặc H (Variant A)
+        noniid_handler: "NonIIDHandler",
+        gt_malicious: Optional[Dict[int, bool]] = None  # Ground truth để debug (có thể None)
     ) -> Tuple[Set[int], Set[int], Dict]:
         """
         Lọc máy khách qua hai giai đoạn.
-        
+
         Pipeline:
-        1. Gọi noniid_handler.compute_adaptive_threshold() để tính θ_adj
+        1. Gọi noniid_handler.compute_adaptive_threshold(H) để tính θ_adj
+           H ở đây là theta_signal (GDS hoặc H tùy variant)
         2. Lọc cứng: ci > θ_adj_hard → loại ngay
         3. Lọc mềm (trên remaining): ci > θ_adj_soft AND R < τ_mode → loại
-        
+
         Args:
-            client_ids: List client IDs (đã được L1+L2 ACCEPTED)
-            confidence_scores: Dict[cid, ci] - điểm bất thường
-            reputations: Dict[cid, R] - điểm danh tiếng
-            mode: Chế độ hiện tại (NORMAL/ALERT/DEFENSE)
-            H: Heterogeneity score
-            noniid_handler: NonIIDHandler instance để tính θ_adj
-        
+            client_ids:        List client IDs (đã qua L1+L2)
+            confidence_scores: Dict[cid, ci]
+            reputations:       Dict[cid, R]
+            mode:              NORMAL / ALERT / DEFENSE
+            H:                 theta_signal (GDS hoặc H behavioral tùy variant)
+            noniid_handler:    NonIIDHandler để tính θ_adj
+            gt_malicious:      Optional Dict[cid, bool] — nếu có, in GT cho từng client
+
         Returns:
-            trusted: Set clients vượt qua cả 2 lọc
-            filtered: Set clients bị loại
-            stats: Dict thống kê
+            trusted, filtered, stats
         """
         # =========================================================
-        # STEP 1: Tính các ngưỡng thích ứng (DÙNG NONIID HANDLER)
+        # STEP 1: Tính ngưỡng thích ứng
         # =========================================================
         theta_hard = noniid_handler.compute_adaptive_threshold(H, self.hard_threshold_base)
         theta_soft = noniid_handler.compute_adaptive_threshold(H, self.soft_threshold_base)
-        tau_mode = self._get_tau_mode(mode)
-        
+        tau_mode   = self._get_tau_mode(mode)
+
+        # --- Header ---
         print(f"\n📊 Two-Stage Filtering:")
-        print(f"   Mode: {mode}, H: {H:.3f}")
-        print(f"   θ_hard = {theta_hard:.3f} (base={self.hard_threshold_base})")
-        print(f"   θ_soft = {theta_soft:.3f} (base={self.soft_threshold_base})")
-        print(f"   τ_mode = {tau_mode:.2f}")
-        
+        print(f"   Mode: {mode} | θ_signal={H:.4f} (used for θ_adj)")
+        print(f"   θ_hard = {theta_hard:.3f}  (base={self.hard_threshold_base}  → ci > {theta_hard:.3f} → filtered)")
+        print(f"   θ_soft = {theta_soft:.3f}  (base={self.soft_threshold_base}  → ci > {theta_soft:.3f} AND R < τ → filtered)")
+        print(f"   τ_mode = {tau_mode:.2f}   (soft rep threshold for mode {mode})")
+
         # =========================================================
-        # STEP 2: Lọc cứng - ci > θ_hard
+        # STEP 2: Lọc cứng
         # =========================================================
         hard_filtered = set()
         for cid in client_ids:
             ci = confidence_scores.get(cid, 0.0)
             if ci > theta_hard:
                 hard_filtered.add(cid)
-        
-        print(f"\n   🔴 Hard Filter (ci > {theta_hard:.3f}):")
-        print(f"      Filtered: {len(hard_filtered)} clients")
-        if hard_filtered and len(hard_filtered) <= 10:
-            for cid in hard_filtered:
-                ci = confidence_scores.get(cid, 0)
-                print(f"         Client {cid}: ci={ci:.3f}")
-        
+
+        print(f"\n   🔴 Hard Filter (ci > {theta_hard:.3f}): {len(hard_filtered)} clients filtered")
+        for cid in sorted(hard_filtered):
+            ci  = confidence_scores.get(cid, 0)
+            R   = reputations.get(cid, 0.0)
+            gt  = "⚠️MAL" if gt_malicious and gt_malicious.get(cid) else "✅BEN" if gt_malicious else "  ?"
+            print(f"      [{gt}] Client {cid:3d}: ci={ci:.3f}  R={R:.4f}")
+
         # =========================================================
-        # STEP 3: Lọc mềm - ci > θ_soft AND R < τ_mode
+        # STEP 3: Lọc mềm
         # =========================================================
-        remaining = set(client_ids) - hard_filtered
+        remaining     = set(client_ids) - hard_filtered
         soft_filtered = set()
-        
+
         for cid in remaining:
             ci = confidence_scores.get(cid, 0.0)
-            R = reputations.get(cid, 0.8)  # Default R = 0.8 nếu chưa có
-            
-            # Điều kiện lọc mềm: PHẢI thỏa cả 2
-            # 1. ci > θ_soft (có điểm nghi ngờ)
-            # 2. R < τ_mode (uy tín thấp theo mode)
+            R  = reputations.get(cid, 0.8)
             if ci > theta_soft and R < tau_mode:
                 soft_filtered.add(cid)
-        
-        print(f"\n   🟡 Soft Filter (ci > {theta_soft:.3f} AND R < {tau_mode:.2f}):")
-        print(f"      Filtered: {len(soft_filtered)} clients")
-        if soft_filtered and len(soft_filtered) <= 10:
-            for cid in soft_filtered:
-                ci = confidence_scores.get(cid, 0)
-                R = reputations.get(cid, 0.8)
-                print(f"         Client {cid}: ci={ci:.3f}, R={R:.3f}")
-        
+
+        print(f"\n   🟡 Soft Filter (ci > {theta_soft:.3f} AND R < {tau_mode:.2f}): {len(soft_filtered)} clients filtered")
+        for cid in sorted(soft_filtered):
+            ci  = confidence_scores.get(cid, 0)
+            R   = reputations.get(cid, 0.8)
+            gt  = "⚠️MAL" if gt_malicious and gt_malicious.get(cid) else "✅BEN" if gt_malicious else "  ?"
+            print(f"      [{gt}] Client {cid:3d}: ci={ci:.3f}  R={R:.4f}")
+
         # =========================================================
-        # STEP 4: Tập tin cậy cuối cùng
+        # STEP 4: Trusted set + Summary table
         # =========================================================
         all_filtered = hard_filtered | soft_filtered
-        trusted = set(client_ids) - all_filtered
-        
-        print(f"\n   ✅ Trusted Clients: {len(trusted)}")
+        trusted      = set(client_ids) - all_filtered
+
+        print(f"\n   ✅ Trusted (passed filter): {len(trusted)} | "
+              f"🚫 Filtered: {len(all_filtered)} "
+              f"(hard={len(hard_filtered)}, soft={len(soft_filtered)})")
+
+        # Summary table — in tất cả clients với ci, R, outcome
+        print(f"\n   {'─'*72}")
+        print(f"   {'ID':>4} │ {'GT':^6} │ {'ci':>6} │ {'R':>7} │ {'ci>θhard':^8} │ {'ci>θsoft':^8} │ {'R<τ':^5} │ Outcome")
+        print(f"   {'─'*72}")
+        for cid in sorted(client_ids):
+            ci        = confidence_scores.get(cid, 0.0)
+            R         = reputations.get(cid, 0.0)
+            gt_str    = "⚠️MAL" if gt_malicious and gt_malicious.get(cid) else ("✅BEN" if gt_malicious else "   ?")
+            ci_h      = "✓" if ci > theta_hard else "✗"
+            ci_s      = "✓" if ci > theta_soft else "✗"
+            r_lt_tau  = "✓" if R < tau_mode  else "✗"
+            if cid in hard_filtered:
+                outcome = "HARD-FILTER"
+            elif cid in soft_filtered:
+                outcome = "SOFT-FILTER"
+            else:
+                outcome = "trusted"
+            print(f"   {cid:>4} │ {gt_str:^6} │ {ci:>6.3f} │ {R:>7.4f} │ {ci_h:^8} │ {ci_s:^8} │ {r_lt_tau:^5} │ {outcome}")
+        print(f"   {'─'*72}")
         
         # Store stats
         self.last_stats = FilterStats(
