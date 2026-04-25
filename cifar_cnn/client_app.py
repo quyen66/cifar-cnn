@@ -105,9 +105,10 @@ def client_fn(context: Context) -> Client:
     
     # Load data for this client
     trainloader, testloader = prepare_datasets(
-        partition_id, num_partitions, 
-        batch_size=int(context.run_config["batch-size"]),
-        alpha=float(context.run_config.get("alpha", 0.5))
+    partition_id, num_partitions,
+    batch_size=int(context.run_config["batch-size"]),
+    partition_type=context.run_config.get("partition-type", "dirichlet"),
+    alpha=float(context.run_config.get("alpha", 0.5))
     )
     
     # Hyperparameters

@@ -42,7 +42,7 @@ batch-size = 128
 learning-rate = 0.001
 proximal-mu = 0.01
 
-partition-type = "non-iid"
+partition-type = "dirichlet"
 alpha = 0.5
 
 use-mixed-precision = true
@@ -51,7 +51,7 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/MADcfg9_moderate_reject/alie"
+save-dir = "saved_models/L2cfg8_relaxed_distance/on_off"
 save-interval = 10
 resume-from = ""
 
@@ -62,7 +62,7 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "alie" 
+attack-type = "on_off" 
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
@@ -162,8 +162,8 @@ min-history-rounds = 10     # Số round tối thiểu để dùng historical
 pca-dims = 20
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 1.5
-mad-k-reject = 4.5
-mad-k-flag = 3.0
+mad-k-reject = 4.0
+mad-k-flag = 2.0
 voting-threshold = 3
 zero-cluster-action = "accept_all"
 
@@ -173,12 +173,12 @@ zero-cluster-action = "accept_all"
 # CHỈ CHẠY SAU WARMUP
 [tool.flwr.app.config.defense.layer2]
 
-distance-multiplier = 1.5
+distance-multiplier = 1.45
 cosine-threshold = 0.3
 
 enable-rescue = true
 
-rescue-cosine-threshold = 0.8     
+rescue-cosine-threshold = 0.9     
 require-distance-pass = true       
 
 # =====================================================================
