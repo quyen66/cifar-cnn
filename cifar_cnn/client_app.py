@@ -102,13 +102,14 @@ def client_fn(context: Context) -> Client:
     
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
-    
+    pin_memory = context.run_config.get("pin-memory", True)
     # Load data for this client
     trainloader, testloader = prepare_datasets(
     partition_id, num_partitions,
     batch_size=int(context.run_config["batch-size"]),
     partition_type=context.run_config.get("partition-type", "dirichlet"),
-    alpha=float(context.run_config.get("alpha", 0.5))
+    alpha=float(context.run_config.get("alpha", 0.5)),
+    pin_memory=pin_memory
     )
     
     # Hyperparameters

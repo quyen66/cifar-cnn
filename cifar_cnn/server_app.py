@@ -590,8 +590,6 @@ class FullPipelineStrategy(FedProx):
             print(f"  ⚠️ WARNING: {bad_ben} benign clients lost >5% reputation!")
         print(f"{'─'*82}\n")
         
-        current_mode = self.mode_controller.get_current_mode()
-
         # Build gt_malicious dict để filtering.py có thể in GT cho từng client
         gt_mal_dict = {seq_cids[i]: gt_malicious_batch[i] for i in range(len(seq_cids))}
 
@@ -599,7 +597,6 @@ class FullPipelineStrategy(FedProx):
             client_ids=seq_cids,
             confidence_scores=confidence_scores,
             reputations=reputations,
-            mode=current_mode,
             H=theta_signal,         # VARIANT B: theta_signal = GDS (dispersion)
             noniid_handler=self.noniid_handler,
             gt_malicious=gt_mal_dict   # Ground truth để debug
@@ -613,24 +610,15 @@ class FullPipelineStrategy(FedProx):
         all_filtered = all_filtered | detection_rejected  # Union 2 sets
 
         # Summary sau khi union với detection_rejected
-        print(f"\n   🔒 Two-Stage Filter + Detection (Mode={current_mode}):")
+        print(f"\n   🔒 Two-Stage Filter + Detection:")
         print(f"      Hard Filter:              {len(hard_filtered):3d} clients")
         print(f"      Soft Filter:              {len(soft_filtered):3d} clients")
         print(f"      Detection Rejected (L1+L2):{len(detection_rejected):3d} clients")
         print(f"      ─────────────────────────────")
         print(f"      Total Filtered:           {len(all_filtered):3d} / {len(seq_cids)} clients")
         
-        # 6. Mode Controller Update - Use update_mode with correct signature
+        # 6. Threat ratio (for metrics)
         threat_ratio = len(all_filtered) / len(seq_cids) if seq_cids else 0
-        new_mode = self.mode_controller.update_mode(
-            threat_ratio=threat_ratio,
-            detected_clients=list(all_filtered),
-            reputations=reputations,
-            current_round=server_round
-        )
-        
-        if new_mode != current_mode:
-            print(f"   ⚡ Mode Changed: {current_mode} → {new_mode}")
 
         # 7. Aggregation
         clean_indices = [i for i, seq_id in enumerate(seq_cids) if seq_id not in all_filtered]
@@ -639,17 +627,18 @@ class FullPipelineStrategy(FedProx):
         
         print(f"\n   📦 Aggregation:")
         print(f"      Clean clients: {len(clean_indices)}/{len(seq_cids)}")
-        print(f"      Mode: {new_mode}")
-        
+        print(f"      Aggregation: R_i weighted")
+
+        WARMUP_ROUNDS = 10
         if not clean_grads:
             print("   ⚠️  No clean clients! Using median of all gradients.")
             agg_grad = self.aggregator.coordinate_median(full_gradients)
-        elif new_mode == "NORMAL":
+        elif server_round <= WARMUP_ROUNDS:
+            n = len(clean_grads)
+            uniform_reps = [1.0 / n] * n
+            agg_grad = self.aggregator.weighted_average(clean_grads, uniform_reps)
+        else:
             agg_grad = self.aggregator.weighted_average(clean_grads, clean_reps)
-        elif new_mode == "ALERT":
-            agg_grad = self.aggregator.trimmed_mean(clean_grads, threat_ratio)
-        else:  # DEFENSE
-            agg_grad = self.aggregator.coordinate_median(clean_grads)
 
         self._update_parameters(agg_grad, results[0][1].parameters)
         
@@ -865,10 +854,8 @@ def server_fn(context: Context) -> ServerAppComponents:
         }
         defense_params['filtering'] = {
             'hard_threshold_base': float(context.run_config.get("defense.filtering.hard-threshold-base", 0.85)),
-            'soft_threshold_base': float(context.run_config.get("defense.filtering.soft-threshold-base", 0.65)),
-            'soft_rep_threshold_normal': float(context.run_config.get("defense.filtering.soft-rep-threshold-normal", 0.2)),
-            'soft_rep_threshold_alert': float(context.run_config.get("defense.filtering.soft-rep-threshold-alert", 0.4)),
-            'soft_rep_threshold_defense': float(context.run_config.get("defense.filtering.soft-rep-threshold-defense", 0.6))
+            'soft_threshold_base': float(context.run_config.get("defense.filtering.soft-threshold-base", 0.06)),
+            'soft_rep_floor': float(context.run_config.get("defense.filtering.soft-rep-floor", 0.30)),
         }
         defense_params['reputation'] = {
             'ema_alpha_increase': float(context.run_config.get("defense.reputation.ema-alpha-increase", 0.15)),
@@ -888,17 +875,7 @@ def server_fn(context: Context) -> ServerAppComponents:
             'raw_p_weight': float(context.run_config.get("defense.reputation.raw-p-weight", 0.5)),
             'history_window_size': int(context.run_config.get("defense.reputation.history-window-size", 5))
         }
-        defense_params['mode'] = {
-            'threshold_normal_to_alert': float(context.run_config.get("defense.mode.threshold-normal-to-alert", 0.15)),
-            'threshold_alert_to_defense': float(context.run_config.get("defense.mode.threshold-alert-to-defense", 0.30)),
-            'hysteresis_rounds': int(context.run_config.get("defense.mode.hysteresis-rounds", 2)),
-            'trust_breach_count': int(context.run_config.get("defense.mode.trust-breach-count", 3)),
-            'trust_breach_threshold': float(context.run_config.get("defense.mode.trust-breach-threshold", 0.85)),
-            'rep_drop_threshold': float(context.run_config.get("defense.mode.rep-drop-threshold", 0.10)),
-            'initial_mode': context.run_config.get("defense.mode.initial-mode", "NORMAL"),
-            'warmup_rounds': warmup_rounds,
-            'safe_weight_epsilon': float(context.run_config.get("defense.aggregation.safe-weight-epsilon", 1e-6))
-        }
+        # defense_params['mode'] removed — ModeController replaced by R_i weighted aggregation
         defense_params['aggregation'] = {
             'safe_weight_epsilon': float(context.run_config.get("defense.aggregation.safe-weight-epsilon", 1e-6)),
             'trim_ratio_min': float(context.run_config.get("defense.aggregation.trim-ratio-min", 0.1)),

@@ -30,7 +30,7 @@ clientapp = "cifar_cnn.client_app:app"
 [tool.flwr.app.config]
 
 num-clients = 40
-num-server-rounds = 50
+num-server-rounds = 40
 fraction-fit = 0.6
 fraction-evaluate = 0.2
 min-fit-clients = 24
@@ -51,7 +51,7 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/L2cfg8_relaxed_distance/on_off"
+save-dir = "saved_models/COMBcfg17_k5_dm_mod_cos_agg/alie"
 save-interval = 10
 resume-from = ""
 
@@ -62,7 +62,7 @@ enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "on_off" 
+attack-type = "alie" 
 attack-ratio = 0.3          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
@@ -162,8 +162,8 @@ min-history-rounds = 10     # Số round tối thiểu để dùng historical
 pca-dims = 20
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 1.5
-mad-k-reject = 4.0
-mad-k-flag = 2.0
+mad-k-reject = 5.0
+mad-k-flag = 3.0
 voting-threshold = 3
 zero-cluster-action = "accept_all"
 
@@ -173,8 +173,8 @@ zero-cluster-action = "accept_all"
 # CHỈ CHẠY SAU WARMUP
 [tool.flwr.app.config.defense.layer2]
 
-distance-multiplier = 1.45
-cosine-threshold = 0.3
+distance-multiplier = 2.5
+cosine-threshold = 0.7
 
 enable-rescue = true
 
@@ -250,27 +250,20 @@ rescued-suspicious-penalty = 0.7
 rescued_euclidean = 0.5
 
 # =====================================================================
-# TWO-STAGE FILTERING 
+# TWO-STAGE FILTERING
 # =====================================================================
 # CHỈ CHẠY SAU WARMUP
 # Hard: ci > θ_adj(base=0.85)
-# Soft: ci > θ_adj(base=0.65) AND R < τ_mode
-#
-# τ_mode (soft-rep-threshold) LOGIC:
-# - NORMAL (an toàn, dễ tính): τ = 0.2 → chỉ filter R < 0.2
-# - ALERT (cảnh giác): τ = 0.4 → filter R < 0.4
-# - DEFENSE (nguy hiểm, khắt khe): τ = 0.6 → filter R < 0.6
+# Soft: ci > θ_adj(base=0.06) AND R < R_floor (mode-independent)
 # =====================================================================
 [tool.flwr.app.config.defense.filtering]
 
 # Ngưỡng cơ sở (θ_base)
 hard-threshold-base = 0.7
-soft-threshold-base = 0.08
+soft-threshold-base = 0.06
 
-# τ_mode - ngưỡng reputation theo mode
-soft-rep-threshold-normal = 0.4
-soft-rep-threshold-alert = 0.7
-soft-rep-threshold-defense = 0.8
+# R_floor - ngưỡng reputation cố định (mode-independent)
+soft-rep-floor = 0.30
 
 # =====================================================================
 # REPUTATION SYSTEM 
@@ -340,46 +333,18 @@ raw-p-weight = 0.5
 history-window-size = 10
 
 # =====================================================================
-# MODE CONTROLLER
+# MODE CONTROLLER — REMOVED: replaced by R_i weighted aggregation
 # =====================================================================
-# Công thức từ PDF:
-# - Mode Decision dựa trên ρ (threat ratio):
-#   + NORMAL: ρ ≤ threshold_normal_to_alert (0.15)
-#   + ALERT: threshold_normal < ρ ≤ threshold_alert_to_defense (0.30)
-#   + DEFENSE: ρ > threshold_alert_to_defense (0.30)
-# 
-# - Hysteresis: Chỉ chuyển mode nếu ổn định >= hysteresis_rounds vòng
+# [tool.flwr.app.config.defense.mode]
 #
-# - Reputation Gates (Emergency Override):
-#   + Gate 1 (Trust Breach): >= trust_breach_count clients với R > trust_breach_threshold bị flag
-#   + Gate 2 (Rep Drop): Rep drop > rep_drop_threshold so với vòng trước
-#
-# - Aggregation Algorithms:
-#   + NORMAL: Weighted Average (theo reputation)
-#   + ALERT: Trimmed Mean (dynamic trim ratio = max(0.1, ρ))
-#   + DEFENSE: Coordinate Median (breakdown point 50%)
-# =====================================================================
-[tool.flwr.app.config.defense.mode]
-
-# Threshold Parameters - Ngưỡng chuyển mode
-threshold-normal-to-alert = 0.20   # ρ > 0.15 → ALERT
-threshold-alert-to-defense = 0.35  # ρ > 0.30 → DEFENSE
-
-# Hysteresis - Yêu cầu ổn định
-hysteresis-rounds = 2              # Số vòng ổn định để chuyển mode
-
-# Gate 1: Trust Breach - Vi phạm niềm tin
-trust-breach-count = 3             # Số clients tin cậy bị flag để trigger
-trust-breach-threshold = 0.85      # Ngưỡng R để coi là "tin cậy cao"
-
-# Gate 2: Reputation Drop - Sụt giảm uy tín
-rep-drop-threshold = 0.08          # % drop rep trung bình để trigger (10%)
-
-# Initial State
-initial-mode = "NORMAL"            # Mode khởi tạo
-
-# Safe Aggregation
-safe-weight-epsilon = 1e-6         # ε để check SR > 0 trong weighted avg
+# threshold-normal-to-alert = 0.20
+# threshold-alert-to-defense = 0.35
+# hysteresis-rounds = 2
+# trust-breach-count = 3
+# trust-breach-threshold = 0.85
+# rep-drop-threshold = 0.08
+# initial-mode = "NORMAL"
+# safe-weight-epsilon = 1e-6
 
 # =====================================================================
 # AGGREGATION (V2) - FULLY CONFIGURABLE
@@ -402,11 +367,11 @@ safe-weight-epsilon = 1e-6         # ε để check SR > 0 trong weighted avg
 # Safe Weight Parameters
 safe-weight-epsilon = 1e-6         # ε để check SR > 0
 
-# Trimmed Mean Parameters
-trim-ratio-min = 0.1               # Tỷ lệ trim tối thiểu (10%)
-trim-ratio-max = 0.4               # Tỷ lệ trim tối đa (40%)
+# Trimmed Mean Parameters — not used in main aggregation path
+# trim-ratio-min = 0.1
+# trim-ratio-max = 0.4
 
-# Weighted Average Parameters  
+# Weighted Average Parameters
 use-reputation-weights = true      # Dùng reputation làm weight
 uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
 
