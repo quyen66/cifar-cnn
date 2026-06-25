@@ -21,6 +21,34 @@ from typing import Dict, List, Tuple, Optional
 from collections import deque
 from dataclasses import dataclass
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GDS NORMALIZATION RANGES
+# Xác định từ thực nghiệm grid test 198-config (seed C: cos=0.8, dm=2.5),
+# quan sát qua 4 mức alpha Dirichlet {0.1, 0.25, 0.5, 1.0}, attack=none,
+# 30 rounds/run, round 11-40 (post-warmup).
+# Mục đích: đưa D_CV, D_sim, D_cluster về cùng scale [0,1] TRƯỚC khi áp
+# weight, để tránh metric có magnitude lớn (D_CV, D_cluster) áp đảo
+# metric có magnitude nhỏ nhưng nhạy hơn với alpha (D_sim) trong phép
+# cộng tuyến tính.
+# ─────────────────────────────────────────────────────────────────────────────
+GDS_NORM_RANGES_CIFAR10 = {
+       'D_CV':      (0.15, 0.50),
+       'D_sim':     (0.02, 0.18),
+       'D_cluster': (0.10, 0.55),
+   }
+
+
+def _normalize_gds_component(value: float, metric_name: str) -> float:
+    """
+    Normalize một component GDS về [0, 1] dùng fixed reference range.
+    Clip về [0, 1] nếu value nằm ngoài range quan sát được.
+    """
+    vmin, vmax = GDS_NORM_RANGES_CIFAR10[metric_name]
+    if vmax - vmin < 1e-9:
+        return 0.5
+    normalized = (value - vmin) / (vmax - vmin)
+    return max(0.0, min(1.0, normalized))
+
 
 @dataclass
 class ClientHistory:
@@ -116,20 +144,22 @@ class NonIIDHandler:
     def compute_heterogeneity_score(
         self,
         gradients: List[np.ndarray],
-        client_ids: List[int]
+        client_ids: List[int],
+        current_round: Optional[int] = None,
     ) -> float:
         """
         Tính Heterogeneity Score H với robust pre-filtering.
-        
+
         Formula (PDF):
             H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
-        
+
         Pre-filtering: Loại 30% gradient xa median nhất để tránh bị thao túng.
-        
+
         Args:
-            gradients: List of gradient arrays
-            client_ids: List of client IDs
-            
+            gradients:     List of gradient arrays
+            client_ids:    List of client IDs
+            current_round: Round hiện tại (dùng cho log [GDS_COMPARE])
+
         Returns:
             H score trong [0, 1]
         """
@@ -137,50 +167,68 @@ class NonIIDHandler:
         if n < 3:
             self.last_h_score = 0.0
             return 0.0
-        
+
         # === ROBUST PRE-FILTERING ===
         # Loại 30% gradient xa median nhất (vì max attack ratio = 30%)
         grad_matrix = np.vstack([g.flatten() for g in gradients])
         g_median = np.median(grad_matrix, axis=0)
-        
+
         dists_to_median = np.linalg.norm(grad_matrix - g_median, axis=1)
-        
+
         keep_ratio = 0.7
         num_keep = max(2, int(n * keep_ratio))
-        
+
         sorted_indices = np.argsort(dists_to_median)
         safe_indices = sorted_indices[:num_keep]
         safe_grad_matrix = grad_matrix[safe_indices]
         n_safe = len(safe_grad_matrix)
-        
-        # === TÍNH GDS COMPONENTS TRÊN TẬP SẠch ===
 
-        # 1. D_CV: Coefficient of Variation của pairwise distances
-        H_CV = self._compute_h_cv(safe_grad_matrix)
+        # === NHÁNH NO-FILTER: tính trên toàn bộ gradient trước pre-filter ===
+        d_cv_nf, d_sim_nf, d_cluster_nf = self._compute_raw_metrics(grad_matrix)
 
-        # 2. D_sim: Cosine dissimilarity
-        H_sim = self._compute_h_sim(safe_grad_matrix)
+        # === TÍNH GDS COMPONENTS TRÊN TẬP SẠCH (nhánh chính thức, có pre-filter) ===
+        H_CV_raw, H_sim_raw, H_cluster_raw = self._compute_raw_metrics(safe_grad_matrix)
 
-        # 3. D_cluster: Cluster dispersion
-        H_cluster = self._compute_h_cluster(safe_grad_matrix)
+        # Normalize về [0,1] dùng fixed reference range TRƯỚC khi áp weight
+        H_CV_norm      = _normalize_gds_component(H_CV_raw,      'D_CV')
+        H_sim_norm     = _normalize_gds_component(H_sim_raw,     'D_sim')
+        H_cluster_norm = _normalize_gds_component(H_cluster_raw, 'D_cluster')
 
-        # Combine
-        H = (self.weight_cv * H_CV +
-             self.weight_sim * H_sim +
-             self.weight_cluster * H_cluster)
+        # Combine trên normalized values
+        H = (self.weight_cv * H_CV_norm +
+             self.weight_sim * H_sim_norm +
+             self.weight_cluster * H_cluster_norm)
 
         H = np.clip(H, 0.0, 1.0)
         self.last_h_score = H
 
-        # Log GDS với component breakdown (compact, 1 dòng)
+        # Log GDS với cả raw và normalized (giữ nguyên dòng log cũ)
         print(f"   🔢 GDS={H:.4f}  "
-              f"(D_CV={H_CV:.3f}×{self.weight_cv}  "
-              f"D_sim={H_sim:.3f}×{self.weight_sim}  "
-              f"D_cluster={H_cluster:.3f}×{self.weight_cluster}  "
+              f"(D_CV_raw={H_CV_raw:.3f} D_CV_norm={H_CV_norm:.3f}×{self.weight_cv}  "
+              f"D_sim_raw={H_sim_raw:.3f} D_sim_norm={H_sim_norm:.3f}×{self.weight_sim}  "
+              f"D_cluster_raw={H_cluster_raw:.3f} D_cluster_norm={H_cluster_norm:.3f}×{self.weight_cluster}  "
               f"| n_safe={n_safe}/{n})")
+
+        # Log so sánh Filter vs No-filter (raw values, không normalize)
+        round_str = str(current_round) if current_round is not None else "?"
+        print(f"   [GDS_COMPARE] Round={round_str} | "
+              f"FILTER(n={n_safe}): D_CV={H_CV_raw:.4f} D_sim={H_sim_raw:.4f} D_cluster={H_cluster_raw:.4f} | "
+              f"NOFILTER(n={n}): D_CV={d_cv_nf:.4f} D_sim={d_sim_nf:.4f} D_cluster={d_cluster_nf:.4f}")
 
         return H
     
+    def _compute_raw_metrics(self, grad_matrix: np.ndarray) -> Tuple[float, float, float]:
+        """Tính D_CV, D_sim, D_cluster trên grad_matrix cho trước (raw, chưa normalize).
+
+        Dùng chung cho cả nhánh filter và no-filter để tránh duplicate code.
+        Returns: (d_cv, d_sim, d_cluster)
+        """
+        return (
+            self._compute_h_cv(grad_matrix),
+            self._compute_h_sim(grad_matrix),
+            self._compute_h_cluster(grad_matrix),
+        )
+
     def _compute_h_cv(self, grad_matrix: np.ndarray) -> float:
         """
         Tính H_CV: Coefficient of Variation của pairwise distances.
@@ -524,14 +572,15 @@ class NonIIDHandler:
     def compute_gds(
         self,
         gradients: List[np.ndarray],
-        client_ids: List[int]
+        client_ids: List[int],
+        current_round: Optional[int] = None,
     ) -> float:
         """
         Alias của compute_heterogeneity_score() với tên rõ nghĩa hơn.
         GDS = w_cv × D_CV + w_sim × D_sim + w_cluster × D_cluster
         Đo sự phân tán hình học gradient → proxy cho môi trường non-IID.
         """
-        return self.compute_heterogeneity_score(gradients, client_ids)
+        return self.compute_heterogeneity_score(gradients, client_ids, current_round=current_round)
 
     def get_client_history_length(self, client_id: int) -> int:
         """Get number of rounds tracked for a client."""

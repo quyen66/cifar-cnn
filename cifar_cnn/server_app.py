@@ -87,6 +87,7 @@ class FullPipelineStrategy(FedProx):
             self.save_interval = 10
             
         self.config_metadata = config_metadata or {}
+        self.dataset_name = self.config_metadata.get('dataset_name', 'cifar-10')
         self.start_time = datetime.now()
         self.detection_history = []
         self.current_parameters = kwargs.get('initial_parameters')
@@ -418,7 +419,7 @@ class FullPipelineStrategy(FedProx):
         # === Bước 2: Tính GDS (Gradient Dispersion Score) ===
         # GDS đo sự phân tán hình học gradient → proxy môi trường non-IID
         # → dùng cho θ_adj (filter threshold) + adaptive reference
-        GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids)
+        GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids, current_round=server_round)
 
         # === Bước 3: Tính H (Behavioral Heterogeneity Score) ===
         # H đo divergence hành vi (gradient direction + loss + accuracy)
@@ -775,7 +776,7 @@ class FullPipelineStrategy(FedProx):
         os.makedirs(self.save_dir, exist_ok=True)
         
         params = parameters_to_ndarrays(self.current_parameters)
-        net = get_model()
+        net = get_model(dataset_name=self.dataset_name)
         set_parameters(net, params)
         
         path = os.path.join(self.save_dir, f"round_{server_round}.pt")
@@ -893,6 +894,8 @@ def server_fn(context: Context) -> ServerAppComponents:
             'min_history_rounds': int(context.run_config.get("defense.adaptive-reference.min-history-rounds", 3)),
         }
     
+    dataset_name = context.run_config.get("dataset", "cifar-10")
+
     config_metadata = {
         'num_clients': num_clients,
         'partition_type': partition_type,
@@ -901,11 +904,12 @@ def server_fn(context: Context) -> ServerAppComponents:
         'attack_ratio': attack_ratio,
         'enable_defense': enable_defense,
         'proximal_mu': proximal_mu,
+        'dataset_name': dataset_name,
     }
-    
-    net = get_model()
+
+    net = get_model(dataset_name=dataset_name)
     initial_params = None
-    
+
     if resume_from and os.path.exists(resume_from):
         print(f"\n{'='*70}")
         print(f"🔄 RESUMING FROM CHECKPOINT: {resume_from}")

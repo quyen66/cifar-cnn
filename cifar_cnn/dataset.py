@@ -1,7 +1,8 @@
 import warnings
 
 import numpy as np
-from torch.utils.data import DataLoader, Subset
+import torch
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 
 
@@ -30,6 +31,93 @@ def load_cifar10_datasets(data_path="./data"):
     testset = datasets.CIFAR10(
         root=data_path, train=False, download=True, transform=transform_test
     )
+
+    return trainset, testset
+
+
+class FEMNISTDataset(Dataset):
+    """Wrapper PyTorch Dataset cho FEMNIST từ HuggingFace (flwrlabs/femnist).
+
+    Cung cấp .targets (list[int]) để tương thích với create_dirichlet_partitions
+    và create_iid_partitions hiện có — tránh phải sửa các hàm partition đó.
+
+    Lưu ý về partition tự nhiên: FEMNIST gốc có ~3500 writers (writer_id),
+    tạo natural non-IID per-writer. Pipeline này vẫn dùng Dirichlet partition
+    nhân tạo (nhất quán với CIFAR-10) thay vì khai thác natural structure —
+    đây là trade-off đã biết, cần khai báo rõ trong Experimental Setup.
+    """
+
+    def __init__(self, hf_dataset, transform=None):
+        self.hf_dataset = hf_dataset
+        self.transform = transform
+        # Đọc toàn bộ nhãn một lần (column access nhanh hơn row-by-row)
+        self.targets = list(hf_dataset['character'])
+
+    def __len__(self):
+        return len(self.hf_dataset)
+
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
+        # Ảnh đã là PIL Image grayscale 28×28 (mode='L')
+        image = item['image']
+        label = item['character']
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label
+
+
+def get_fashion_mnist_transforms():
+    transform_train = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.2860,), (0.3530,)),
+    ])
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.2860,), (0.3530,)),
+    ])
+    return transform_train, transform_test
+
+
+def load_fashion_mnist_datasets(data_path="./data"):
+    transform_train, transform_test = get_fashion_mnist_transforms()
+
+    trainset = datasets.FashionMNIST(
+        root=data_path, train=True, download=True, transform=transform_train
+    )
+    testset = datasets.FashionMNIST(
+        root=data_path, train=False, download=True, transform=transform_test
+    )
+
+    return trainset, testset
+
+
+def get_femnist_transforms():
+    transform_train = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,)),
+    ])
+    return transform_train, transform_test
+
+
+def load_femnist_datasets():
+    """Load FEMNIST qua HuggingFace datasets (flwrlabs/femnist).
+
+    FEMNIST: 62 class (chữ số 0-9, chữ hoa A-Z, chữ thường a-z), ảnh 28×28 grayscale.
+    Chỉ có 'train' split → tự chia 90/10 (seed=42) để lấy test set.
+    """
+    from datasets import load_dataset
+
+    transform_train, transform_test = get_femnist_transforms()
+
+    raw = load_dataset('flwrlabs/femnist', split='train')
+    split = raw.train_test_split(test_size=0.1, seed=42)
+
+    trainset = FEMNISTDataset(split['train'], transform=transform_train)
+    testset  = FEMNISTDataset(split['test'],  transform=transform_test)
 
     return trainset, testset
 
@@ -247,7 +335,8 @@ def prepare_datasets(
     alpha=0.5,
     num_workers=0,
     pin_memory=True,
-    seed=42,  # seed truyền thống nhất xuống tất cả hàm
+    seed=42,
+    dataset_name="cifar-10",
 ):
     """Chuẩn bị dataloader cho một client trong vòng FL.
 
@@ -260,6 +349,7 @@ def prepare_datasets(
         num_workers:    Số worker cho DataLoader
         pin_memory:     Pin memory cho DataLoader
         seed:           Seed cố định cho toàn bộ quá trình partition — BẮT BUỘC
+        dataset_name:   "cifar-10" | "femnist" — quyết định load dataset nào
 
     Returns:
         trainloader, testloader
@@ -271,7 +361,15 @@ def prepare_datasets(
         đây là simulation artifact — không phản ánh FL thực tế. Cần khai báo rõ
         trong phần Experimental Setup của luận văn.
     """
-    trainset, testset = load_cifar10_datasets()
+    if dataset_name == "femnist":
+        trainset, testset = load_femnist_datasets()
+        num_classes = 62
+    elif dataset_name == "fashion-mnist":
+        trainset, testset = load_fashion_mnist_datasets()
+        num_classes = 10
+    else:
+        trainset, testset = load_cifar10_datasets()
+        num_classes = 10
 
     if partition_type == "iid":
         train_partitions = create_iid_partitions(trainset, num_clients, seed=seed)
@@ -281,17 +379,17 @@ def prepare_datasets(
         # Train set: Non-IID theo Dirichlet
         # Test set: IID — cho phép đánh giá global model công bằng (chuẩn FL research)
         train_partitions = create_dirichlet_partitions(
-            trainset, num_clients, alpha=alpha, seed=seed
+            trainset, num_clients, alpha=alpha, num_classes=num_classes, seed=seed
         )
         test_partitions = create_iid_partitions(testset, num_clients, seed=seed + 1)
 
     else:  # "non-iid"
         # Pathological non-IID: 2 classes/client, chuẩn FedAvg paper (McMahan 2017)
         train_partitions = create_non_iid_partitions(
-            trainset, num_clients, classes_per_client=2, seed=seed
+            trainset, num_clients, num_classes=num_classes, classes_per_client=2, seed=seed
         )
         test_partitions = create_non_iid_partitions(
-            testset, num_clients, classes_per_client=2, seed=seed + 1
+            testset, num_clients, num_classes=num_classes, classes_per_client=2, seed=seed + 1
         )
 
     # Map client_id → partition index

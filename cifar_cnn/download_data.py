@@ -7,4 +7,16 @@ transform = transforms.ToTensor()
 print("Downloading CIFAR-10...")
 trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
 testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
-print(f"✅ Success! Train: {len(trainset)}, Test: {len(testset)}")
+print(f"✅ CIFAR-10 OK! Train: {len(trainset)}, Test: {len(testset)}")
+
+print("\nDownloading Fashion-MNIST...")
+fm_train = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
+fm_test = datasets.FashionMNIST(root='./data', train=False, download=True, transform=transform)
+print(f"✅ Fashion-MNIST OK! Train: {len(fm_train)}, Test: {len(fm_test)}")
+
+print("\nDownloading FEMNIST (flwrlabs/femnist via HuggingFace)...")
+from datasets import load_dataset
+raw = load_dataset('flwrlabs/femnist', split='train')
+split = raw.train_test_split(test_size=0.1, seed=42)
+print(f"✅ FEMNIST OK! Train: {len(split['train'])}, Test: {len(split['test'])} (90/10 split)")
+print(f"   Classes: 62 (0-9, A-Z, a-z) | Image: 28×28 grayscale")

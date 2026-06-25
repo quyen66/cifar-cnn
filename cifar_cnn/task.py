@@ -9,44 +9,50 @@ from torchvision import datasets, transforms
 import numpy as np
 
 class CNN(nn.Module):
-    """CNN model cho CIFAR-10."""
-    
-    def __init__(self, num_classes=10):
+    """CNN model — hỗ trợ CIFAR-10 (3×32×32) và FEMNIST (1×28×28, 62 class)."""
+
+    def __init__(self, num_classes=10, in_channels=3, input_size=32):
         super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(64)
         self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
-        
+
         self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
         self.conv4 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
         self.bn4 = nn.BatchNorm2d(128)
-        
+
         self.conv5 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
         self.bn5 = nn.BatchNorm2d(256)
         self.conv6 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         self.bn6 = nn.BatchNorm2d(256)
-        
+
         self.pool = nn.MaxPool2d(2, 2)
         self.dropout = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(256 * 4 * 4, 512)
+
+        # Tính kích thước feature map sau 3 lần MaxPool2d(2,2)
+        # CIFAR-10: 32 // 8 = 4 → 4×4; FEMNIST: 28 // 8 = 3 → 3×3
+        feat_size = input_size // (2 ** 3)
+        self.flatten_dim = 256 * feat_size * feat_size
+
+        self.fc1 = nn.Linear(self.flatten_dim, 512)
         self.fc2 = nn.Linear(512, num_classes)
-    
+
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = self.pool(x)
-        
+
         x = F.relu(self.bn3(self.conv3(x)))
         x = F.relu(self.bn4(self.conv4(x)))
         x = self.pool(x)
-        
+
         x = F.relu(self.bn5(self.conv5(x)))
         x = F.relu(self.bn6(self.conv6(x)))
         x = self.pool(x)
-        
-        x = x.view(-1, 256 * 4 * 4)
+
+        x = x.view(-1, self.flatten_dim)
         x = self.dropout(x)
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
@@ -54,8 +60,16 @@ class CNN(nn.Module):
         return x
 
 
-def get_model():
-    return CNN(num_classes=10)
+def get_model(dataset_name="cifar-10"):
+    """
+    dataset_name: "cifar-10" → 3 channel, 32×32, 10 class
+                  "femnist"  → 1 channel, 28×28, 62 class
+    """
+    if dataset_name == "femnist":
+        return CNN(num_classes=62, in_channels=1, input_size=28)
+    if dataset_name == "fashion-mnist":
+        return CNN(num_classes=10, in_channels=1, input_size=28)
+    return CNN(num_classes=10, in_channels=3, input_size=32)
 
 def load_data(partition_id, num_partitions, batch_size=128):
     """

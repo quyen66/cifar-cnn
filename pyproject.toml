@@ -51,19 +51,19 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/COMBcfg17_k5_dm_mod_cos_agg/alie"
+save-dir = "saved_models/prefilter_compare/fashion-mnist/alpha_0_5_rep1"
 save-interval = 10
 resume-from = ""
 
-# cỉa-10 , mnist, femnist
-dataset = "cifar-10"
+# cifar-10, femnist, fashion-mnist
+dataset = "fashion-mnist"
 
 enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "alie" 
-attack-ratio = 0.3          # 30% clients là attackers
+attack-type = "none" 
+attack-ratio = 0.0          # 30% clients là attackers
 
 # 1. Random Noise (Uniform)
 random-noise-scale = 0.7   # Biên độ nhiễu Uniform [-scale, scale]
@@ -162,7 +162,7 @@ min-history-rounds = 10     # Số round tối thiểu để dùng historical
 pca-dims = 20
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 1.5
-mad-k-reject = 5.0
+mad-k-reject = 6.0
 mad-k-flag = 3.0
 voting-threshold = 3
 zero-cluster-action = "accept_all"
@@ -174,7 +174,7 @@ zero-cluster-action = "accept_all"
 [tool.flwr.app.config.defense.layer2]
 
 distance-multiplier = 2.5
-cosine-threshold = 0.7
+cosine-threshold = 0.8
 
 enable-rescue = true
 
@@ -190,11 +190,11 @@ require-distance-pass = true
 [tool.flwr.app.config.defense.noniid]
 
 # GDS weights (must sum to 1.0)
-weight-cv = 0.1
-weight-sim = 0.1
-weight-cluster = 0.8
+weight-cv = 0.4
+weight-sim = 0.4
+weight-cluster = 0.2
 
-# θ_adj parameters (PDF: θ_base + (0.5 - H) × factor)
+# θ_adj parameters 
 adjustment-factor = 0.2
 theta-adj-clip-min = 0.5
 theta-adj-clip-max = 0.8
@@ -202,7 +202,7 @@ theta-adj-clip-max = 0.8
 # Baseline tracking
 baseline-window-size = 10
 
-# δi weights (PDF: 0.5 và 0.5)
+# δi weights
 delta-norm-weight = 0.5
 delta-direction-weight = 0.5
 

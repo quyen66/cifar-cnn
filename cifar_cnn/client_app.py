@@ -98,18 +98,20 @@ def client_fn(context: Context) -> Client:
     """Create a Flower client instance based on configuration."""
     
     # 1. Load configuration and data
-    net = get_model()
-    
+    dataset_name = context.run_config.get("dataset", "cifar-10")
+    net = get_model(dataset_name=dataset_name)
+
     partition_id = context.node_config["partition-id"]
     num_partitions = context.node_config["num-partitions"]
     pin_memory = context.run_config.get("pin-memory", True)
     # Load data for this client
     trainloader, testloader = prepare_datasets(
-    partition_id, num_partitions,
-    batch_size=int(context.run_config["batch-size"]),
-    partition_type=context.run_config.get("partition-type", "dirichlet"),
-    alpha=float(context.run_config.get("alpha", 0.5)),
-    pin_memory=pin_memory
+        partition_id, num_partitions,
+        batch_size=int(context.run_config["batch-size"]),
+        partition_type=context.run_config.get("partition-type", "dirichlet"),
+        alpha=float(context.run_config.get("alpha", 0.5)),
+        pin_memory=pin_memory,
+        dataset_name=dataset_name,
     )
     
     # Hyperparameters
