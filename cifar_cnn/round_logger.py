@@ -25,7 +25,6 @@ USAGE (trong server_app.py):
         confidence_scores=confidence_scores,
         reputations=current_reputations,
         filter_stats=filter_stats,
-        ref_alpha=self.ref_tracker.last_alpha_used,
         accuracy=None  # optional
     )
 """
@@ -64,7 +63,6 @@ class RoundLogger:
         confidence_scores: Dict[int, float],
         reputations: Dict[int, float],
         filter_stats: Dict,
-        ref_alpha: float = 0.0,
         accuracy: Optional[float] = None,
     ) -> str:
         """Generate + print + optionally save all tables for this round."""
@@ -107,7 +105,7 @@ class RoundLogger:
         self._header(L, round_num, mode, H, seq_cids, mal_set)
         self._table1_magnitude(L, seq_cids, mag, l1_status, gt)
         self._table2_dbscan(L, seq_cids, db, l1_status, mal_set, gt)
-        self._table3_dist_cos(L, seq_cids, l1_status, l2_dec, layer2_stats, suspicion_levels, ref_alpha, gt)
+        self._table3_dist_cos(L, seq_cids, l1_status, l2_dec, layer2_stats, suspicion_levels, gt)
         self._table4_drift(L, seq_cids, l2_dec, layer2_drift_info, layer2_status, gt)
         self._table5_filter(L, seq_cids, layer2_status, confidence_scores, reputations, filter_stats, mal_set, gt)
         self._summary(L, round_num, mode, H, seq_cids, mal_set, l1_status,
@@ -255,7 +253,7 @@ class RoundLogger:
     # TABLE 3 — L2 DISTANCE + COSINE
     # =========================================================================
 
-    def _table3_dist_cos(self, L, seq_cids, l1_status, l2_dec, layer2_stats, suspicion_levels, ref_alpha, gt):
+    def _table3_dist_cos(self, L, seq_cids, l1_status, l2_dec, layer2_stats, suspicion_levels, gt):
         W           = self.WIDTH - 2
         dist_thresh = layer2_stats.get("distance_threshold", 0.0)
         cos_thresh  = layer2_stats.get("cosine_threshold", 0.3)
@@ -264,11 +262,10 @@ class RoundLogger:
         L.append("")
         L.append("")
         L.append(f"  \u250c\u2500 Layer 2 \u2014 Distance + Cosine Analysis {'\u2500' * (W - 43)}\u2510")
-        L.append(f"  \u2502  So s\u00e1nh gradient vs reference (AdaptiveRef blend). Quy\u1ebft \u0111\u1ecfnh theo decision matrix.{' ' * (W - 88)}\u2502")
+        L.append(f"  \u2502  So s\u00e1nh gradient vs reference (current-round median). Quy\u1ebft \u0111\u1ecfnh theo decision matrix.{' ' * (W - 91)}\u2502")
         L.append(f"  \u2502{' ' * W}\u2502")
 
-        alpha_line = f"AdaptiveRef \u03b1={ref_alpha:.3f} (Historical {ref_alpha*100:.1f}% + Current {(1-ref_alpha)*100:.1f}%)"
-        ref_row    = f"    Reference        : {alpha_line}"
+        ref_row    = f"    Reference        : current-round coordinate median"
         L.append(f"  \u2502{ref_row}{' ' * (W - len(ref_row))}\u2502")
         dt_row     = f"    Distance Thresh  : {dist_thresh:<82.1f}"
         L.append(f"  \u2502{dt_row}\u2502")

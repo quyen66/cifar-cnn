@@ -1,14 +1,13 @@
 """
 Server Application - Trusted Warm-up & Adaptive Defense (V2 - Soft Pipeline)
 =============================================================================
-⚗️  EXPERIMENT VARIANT B: θ_adj theo GDS (Gradient Dispersion Score)
+⚗️  VARIANT B: θ_adj theo GDS (Gradient Dispersion Score)
     - GDS  = gradient geometry dispersion  → dùng cho:
-             * θ_adj (filter threshold)
-             * adaptive reference weight
+             * θ_adj (filter threshold), qua WARMUP_STATIC anchor (mean GDS
+               các vòng warmup — xem _warmup_gds_anchor)
     - H    = behavioral divergence (grad direction + loss + acc) → dùng cho:
              * mode controller threat level
              * reputation penalty multiplier
-    So sánh với Variant A (θ_adj theo H).
 =============================================================================
 """
 
@@ -106,7 +105,7 @@ class FullPipelineStrategy(FedProx):
         self.warmup_rounds = int(warmup_rounds)
 
         self._warmup_gds_history = []   # accumulate warmup GDS for WARMUP_STATIC anchor
-        self._warmup_gds_anchor = 0.5   # default anchor when GDS disabled
+        self._warmup_gds_anchor = 0.5   # fallback anchor until warmup finalizes it (see below)
 
         # 🆕 GAS layer (Gradient Anomaly Splitting) — parallel to L1/L2, union-only
         self.ablation_gas_enabled = bool(ablation_gas_enabled)
@@ -692,7 +691,7 @@ class FullPipelineStrategy(FedProx):
             client_ids=seq_cids,
             confidence_scores=confidence_scores,
             reputations=reputations,
-            H=theta_signal,         # VARIANT B: theta_signal = GDS (dispersion)
+            H=theta_signal,         # VARIANT B: theta_signal = WARMUP_STATIC GDS anchor
             noniid_handler=self.noniid_handler,
             gt_malicious=gt_mal_dict   # Ground truth để debug
         )
