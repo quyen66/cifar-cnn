@@ -37,6 +37,26 @@ from typing import List, Dict, Tuple, Optional
 from enum import Enum
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pure helpers for alternative cosine-threshold strategies (THRESH_COMPARE
+# project — B_WARMUP / C_ROUND). Do not touch Layer2Detector state; callers
+# (server_app.py) use these to compute a threshold value and assign it to
+# `Layer2Detector.cosine_threshold` before calling `.detect()`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cosine_percentile_threshold(cosines, percentile: float) -> float:
+    """Threshold = the given percentile of a cosine sample (e.g. p5 -> rule_p5)."""
+    return float(np.percentile(np.asarray(cosines), percentile))
+
+
+def cosine_mad_threshold(cosines, k: float) -> float:
+    """Threshold = median(cosines) - k * MAD(cosines)."""
+    vals = np.asarray(cosines)
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    return med - k * mad
+
+
 class Layer2Result(Enum):
     """Kết quả cuối cùng sau Layer 2."""
     REJECTED = "REJECTED"

@@ -30,7 +30,8 @@ clientapp = "cifar_cnn.client_app:app"
 [tool.flwr.app.config]
 
 num-clients = 40
-num-server-rounds = 40
+num-server-rounds = 50
+simulation-seed = 42
 fraction-fit = 0.6
 fraction-evaluate = 0.2
 min-fit-clients = 24
@@ -43,7 +44,7 @@ learning-rate = 0.001
 proximal-mu = 0.01
 
 partition-type = "dirichlet"
-alpha = 0.5
+alpha = 0.1
 
 use-mixed-precision = true
 num-workers = 2
@@ -51,19 +52,19 @@ pin-memory = true
 persistent-workers = true
 
 auto-save = true
-save-dir = "saved_models/prefilter_compare/fashion-mnist/alpha_0_5_rep1"
-save-interval = 10
+save-dir = "saved_models/stageB_compare/A_FIX/cifar-10_minmax_a0.1_s42"
+save-interval = 50
 resume-from = ""
 
 # cifar-10, femnist, fashion-mnist
-dataset = "fashion-mnist"
+dataset = "cifar-10"
 
 enable-defense = true
 
 # --- ATTACK CONFIGURATION ---
 # Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
-attack-type = "none" 
-attack-ratio = 0.0          # 30% clients là attackers
+attack-type = "minmax"
+attack-ratio = 0.3
 
 # 1. Random Noise (Uniform)
 random-noise-scale = 0.7   # Biên độ nhiễu Uniform [-scale, scale]
@@ -162,7 +163,7 @@ min-history-rounds = 10     # Số round tối thiểu để dùng historical
 pca-dims = 20
 dbscan-min-samples = 3
 dbscan-eps-multiplier = 1.5
-mad-k-reject = 6.0
+mad-k-reject = 4.0
 mad-k-flag = 3.0
 voting-threshold = 3
 zero-cluster-action = "accept_all"
@@ -178,8 +179,19 @@ cosine-threshold = 0.8
 
 enable-rescue = true
 
-rescue-cosine-threshold = 0.9     
-require-distance-pass = true       
+rescue-cosine-threshold = 0.9
+require-distance-pass = true
+
+# =====================================================================
+# THRESH_COMPARE — L2 cosine threshold mode comparison (added 2026-07-18)
+# cosine-threshold above stays the FIXED-mode value (0.8, unchanged GOLDEN).
+# cos-warmup-percentile: for WARMUP_CALIB — Stage A chose rule_p5 (percentile 5)
+# cos-round-k: for ROUND_ADAPTIVE — Stage B sweeps k in {2.5, 3.5}
+# Controlled by ablation.cosine-threshold-mode below; run_stageB_compare.py
+# sets these per mode. DO NOT change manually.
+# =====================================================================
+cos-warmup-percentile = 5.0
+cos-round-k = 2.5
 
 # =====================================================================
 # NON-IID HANDLER
@@ -374,6 +386,62 @@ safe-weight-epsilon = 1e-6         # ε để check SR > 0
 # Weighted Average Parameters
 use-reputation-weights = true      # Dùng reputation làm weight
 uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
+
+# =====================================================================
+# ABLATION FLAGS — endpoint ablation study (C0-C3)
+# DO NOT change manually; run_ablation.py / run_gas_ablation.py set these per config.
+# =====================================================================
+[tool.flwr.app.config.ablation]
+
+# C0: true  / C1: false / C2: false / C3: false
+# GATE (2026-07-08, GAS ablation project): reset to C0 (GOLDEN full pipeline) — was
+# left at "false" by a prior GDS-recheck test run. GAS experiment requires alpha-blend
+# and GDS ON (one-variable-at-a-time: only GAS on/off differs between G_OFF/G_ON).
+alpha-blend-enabled = true
+
+# C0: "GDS_PERROUND" / C1: "GDS_PERROUND" / C2: "WARMUP_STATIC" / C3: "WARMUP_STATIC"
+# GATE reset: WARMUP_STATIC -> GDS_PERROUND (see note above)
+theta-signal-mode = "GDS_PERROUND"
+
+# C0: true  / C1: true  / C2: true  / C3: false
+# GATE reset: false -> true (see note above)
+gds-enabled = true
+
+# =====================================================================
+# GAS LAYER — Gradient Anomaly Splitting (pure statistical filter, parallel to L1/L2)
+# Added for the GAS ablation project (2026-07-08). NOT part of L1/L2 — union-only:
+# final_rejected = L1L2_rejected ∪ gas_flagged. Toggled by ablation.gas-enabled below
+# (run_gas_ablation.py sets this per G_OFF/G_ON config; all other keys stay fixed).
+# =====================================================================
+
+# G_OFF: false (golden pipeline unchanged) / G_ON: true (golden + GAS layer, union)
+# GATE (cleanup project, this run): reset true -> false — leftover from the completed
+# GAS ablation matrix (last run in that matrix was G_ON). GAS is not part of GOLDEN
+# for this cleanup/confirmation project; OLD/NEW configs below don't reference it.
+gas-enabled = false
+
+# =====================================================================
+# THRESH_COMPARE — L2 cosine threshold mode (added 2026-07-18)
+# FIXED (default, GOLDEN unchanged, cosine=0.8 constant) | WARMUP_CALIB
+# (locked at round==warmup_rounds from that run's own warmup cosine, rule
+# chosen in Stage A: percentile 5) | ROUND_ADAPTIVE (median-k*MAD of that
+# round's own cosines, recomputed every post-warmup round). Not GOLDEN — must
+# stay "FIXED" outside the THRESH_COMPARE project; run_stageB_compare.py sets
+# this per mode.
+cosine-threshold-mode = "FIXED"
+
+[tool.flwr.app.config.defense.gas]
+
+# Number of random (fixed-seed) dimension chunks the gradient is split into
+p-chunks = 10
+# Fixed seed for the chunk partition — identical across all 6 seeds/runs for stability
+chunk-seed = 1234
+# Adaptive threshold multiplier: flag if gas_score > median + k-gas * MAD (NOT top-k;
+# top-k would require knowing the attacker count, which is unavailable at run time)
+k-gas = 2.5
+# Prefilter keep-ratio for computing the per-chunk median reference — matches the
+# GDS prefilter methodology (noniid_handler.py L178, keep_ratio=0.7) for consistency
+prefilter-keep-ratio = 0.7
 
 # =====================================================================
 # FEDERATION

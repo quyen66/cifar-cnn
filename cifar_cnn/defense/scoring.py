@@ -51,6 +51,7 @@ class ConfidenceScorer:
         layer2_status: Dict[int, str],
         suspicion_levels: Dict[int, str],    # "suspicious", "clean"... (từ Layer 2)
         baseline_deviations: Dict[int, float], # δi (từ NonIIDHandler)
+        current_round: int = 0,
     ) -> Dict[int, float]:
         
         scores = {}
@@ -109,9 +110,22 @@ class ConfidenceScorer:
                 self.w_base * delta_factor)
             
             scores[cid] = min(max(ci, 0.0), 1.0)
-            
+
             # Debug print
             print(f"         Client {cid}: ci={scores[cid]:.3f} (I_flag={I_flagged}, L1={l1_status}, L2={l2_status})")
 
-            
+        # [CI_DEBUG] log: ci stats cho các client KHÔNG bị L1/L2 reject hoàn toàn
+        accepted_ci = [
+            scores[cid] for cid in client_ids
+            if layer1_results.get(cid, "ACCEPTED") != "REJECTED"
+            and layer2_status.get(cid, "ACCEPTED") != "REJECTED"
+        ]
+        if accepted_ci:
+            ci_max = max(accepted_ci)
+            ci_mean = float(np.mean(accepted_ci))
+        else:
+            ci_max = ci_mean = 0.0
+        print(f"   [CI_DEBUG] Round={current_round} | weight_baseline={self.w_base} | "
+              f"ci_max_accepted={ci_max:.4f} | ci_mean_accepted={ci_mean:.4f}")
+
         return scores

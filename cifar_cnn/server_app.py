@@ -47,8 +47,10 @@ from cifar_cnn.defense import (
 )
 # BehavioralScorer nằm trong noniid_handler.py
 from cifar_cnn.defense.noniid_handler import BehavioralScorer
-from cifar_cnn.defense.reputation import ClientStatus 
-from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker 
+from cifar_cnn.defense.reputation import ClientStatus
+from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker
+from cifar_cnn.defense.gas_filter import gas_filter, compute_gas_diagnostics
+from cifar_cnn.defense.layer2_detection import cosine_percentile_threshold, cosine_mad_threshold
 
 def weighted_average(metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, Scalar]:
     """Aggregate evaluation metrics."""
@@ -72,7 +74,18 @@ class FullPipelineStrategy(FedProx):
                  start_round=0,
                  enable_defense=False,
                  defense_params=None,
-                 warmup_rounds=10, 
+                 warmup_rounds=10,
+                 ablation_alpha_blend=True,
+                 ablation_theta_mode='GDS_PERROUND',
+                 ablation_gds=True,
+                 ablation_gas_enabled=False,
+                 gas_p=10,
+                 gas_seed=1234,
+                 gas_k=2.5,
+                 gas_prefilter_keep_ratio=0.7,
+                 ablation_cosine_mode='FIXED',
+                 cos_warmup_percentile=5.0,
+                 cos_round_k=2.5,
                  **kwargs):
         super().__init__(*args, **kwargs)
         
@@ -95,7 +108,33 @@ class FullPipelineStrategy(FedProx):
         self.enable_defense = bool(enable_defense)
         self.defense_params = defense_params or {}
         self.warmup_rounds = int(warmup_rounds)
-        
+
+        # Ablation flags
+        self.ablation_alpha_blend = bool(ablation_alpha_blend)
+        self.ablation_theta_mode = str(ablation_theta_mode)   # 'GDS_PERROUND' | 'WARMUP_STATIC'
+        self.ablation_gds = bool(ablation_gds)
+        self._warmup_gds_history = []   # accumulate warmup GDS for WARMUP_STATIC anchor
+        self._warmup_gds_anchor = 0.5   # default anchor when GDS disabled
+
+        # 🆕 GAS layer (Gradient Anomaly Splitting) — parallel to L1/L2, union-only
+        self.ablation_gas_enabled = bool(ablation_gas_enabled)
+        self.gas_p = int(gas_p)
+        self.gas_seed = int(gas_seed)
+        self.gas_k = float(gas_k)
+        self.gas_prefilter_keep_ratio = float(gas_prefilter_keep_ratio)
+        self._last_gas_flagged = set()
+        self._last_gas_diag = None
+
+        # 🆕 THRESH_COMPARE: L2 cosine threshold mode — FIXED (default, unchanged
+        # pipeline) | WARMUP_CALIB (locked from warmup cosine, rule_p5 chosen in
+        # Stage A) | ROUND_ADAPTIVE (median - k*MAD of that round's own cosines)
+        self.ablation_cosine_mode = str(ablation_cosine_mode)
+        self.cos_warmup_percentile = float(cos_warmup_percentile)
+        self.cos_round_k = float(cos_round_k)
+        self._warmup_cosine_history = []       # accumulate warmup cosines for WARMUP_CALIB
+        self._cosine_threshold_locked = None   # set once at round==warmup_rounds
+        self._last_cos_threshold_actual = None # actual threshold used this round (for logging)
+
         # Chúng ta sẽ dùng logic động (Metrics) để xác định malicious, 
         # nhưng vẫn giữ hàm này để xác định trusted cho warmup
         self.malicious_clients = self._identify_malicious_clients()
@@ -103,9 +142,14 @@ class FullPipelineStrategy(FedProx):
 
         self.total_tp = 0
         self.total_fp = 0
-        
+
         self.previous_full_grad = None
         self.warmup_client_proxies = None # cố định client proxies trong warmup
+        self._probe = None  # [PROBE] GDSProbe instance, set by server_fn (logging only)
+        self._probe_ab = None  # [PROBE-AB] GDSProbeAB instance for A/B analysis
+        self._threshold_probe = None  # [PROBE-THR] ThresholdProbe (L1/L2 raw scores, logging only)
+        self._warmup_cosine_probe = None  # [PROBE-COS] WarmupCosineProbe (warmup L2 cosine, logging only)
+        self._mode_round_probe = None  # [PROBE-MODE] ModeRoundProbe (per-round DR/FPR/cos stats, logging only)
         
         # Mapping sẽ được xây dựng khi cần từ actual client.cid
         print(f"   📋 Trusted Clients Set: {sorted(self.trusted_clients)}")
@@ -115,6 +159,8 @@ class FullPipelineStrategy(FedProx):
             print("🛡️  HYBRID DEFENSE V2: SOFT PIPELINE ACTIVATED (FULL MODEL MODE)")
             print(f"   Save Interval: {self.save_interval} rounds")
             print(f"   Auto Save: {self.auto_save}")
+            print(f"   [ABLATION] alpha_blend={self.ablation_alpha_blend}  "
+                  f"theta_mode={self.ablation_theta_mode}  gds={self.ablation_gds}")
             print("="*70)
             self._initialize_defense_components()
     
@@ -281,6 +327,7 @@ class FullPipelineStrategy(FedProx):
             # ===== END DEBUG =====
             
             trusted_grads = []
+            trusted_ids = []
             trusted_reps = []
             trusted_count = 0
             malicious_count = 0
@@ -314,13 +361,14 @@ class FullPipelineStrategy(FedProx):
                     
                     # Lưu proxy của trusted client
                     trusted_proxies_round1.append(client)
-                    
+
                     p = parameters_to_ndarrays(res.parameters)
                     w_client_flat = np.concatenate([x.flatten() for x in p])
                     update_flat = w_client_flat - global_flat  # UPDATE = W_client - W_global
                     trusted_grads.append(update_flat)
-                    
-                    self.noniid_handler.update_client_gradient(partition_id, update_flat) 
+                    trusted_ids.append(partition_id)
+
+                    self.noniid_handler.update_client_gradient(partition_id, update_flat)
                     self.reputation_system.initialize_client(partition_id, is_trusted=True)
                     trusted_reps.append(1.0)
                 
@@ -340,12 +388,83 @@ class FullPipelineStrategy(FedProx):
                 print(f"   🔍 [DEBUG] Trusted set: {sorted(self.trusted_clients)}")
                 partition_ids = [res.metrics.get("partition_id", "N/A") for _, res in results]
                 print(f"   [DEBUG] Partition IDs from metrics: {partition_ids}")
-                if should_save: self._save_checkpoint(server_round) 
+                if should_save: self._save_checkpoint(server_round)
                 return self.current_parameters, {}
+
+            # [PROBE-THR] Raw L1 magnitude scores during warmup (logging only — L1/L2
+            # are BYPASSED in warmup, nothing here is fed back into any decision).
+            # Uses the SAME pure formula (_magnitude_filter has no side effects) as
+            # the real post-warmup filter, for k-calibration analysis.
+            if self._threshold_probe is not None and len(trusted_grads) >= 2:
+                try:
+                    _wu_mag_status, _wu_mag_stats = self.layer1_detector._magnitude_filter(
+                        trusted_grads, trusted_ids
+                    )
+                    self._threshold_probe.record_warmup_round(
+                        server_round=server_round,
+                        client_ids=trusted_ids,
+                        magnitude_stats=_wu_mag_stats,
+                    )
+                except Exception as _thr_wu_e:
+                    print(f"   [PROBE-THR] warmup record failed: {_thr_wu_e}")
+
+            # [PROBE-COS / WARMUP_CALIB] Raw L2 cosine during warmup. Layer2Detector.detect()
+            # is NEVER called here, only its pure _compute_metrics helper, reference=None ->
+            # median of trusted_grads, matching Layer2Detector's own internal fallback formula
+            # exactly. Computed once, shared by two independent consumers:
+            #   - self._warmup_cosine_probe (opt-in, logging only)
+            #   - self._warmup_cosine_history (accumulated only when ablation_cosine_mode ==
+            #     'WARMUP_CALIB' — this DOES feed a real decision: the locked threshold below)
+            _need_wu_cos = (self._warmup_cosine_probe is not None or
+                             self.ablation_cosine_mode == 'WARMUP_CALIB')
+            if _need_wu_cos and len(trusted_grads) >= 2:
+                try:
+                    _wu_dist, _wu_cos, _wu_ref = self.layer2_detector._compute_metrics(
+                        trusted_grads, reference_vector=None
+                    )
+                    if self._warmup_cosine_probe is not None:
+                        self._warmup_cosine_probe.record_round(
+                            server_round=server_round,
+                            client_ids=trusted_ids,
+                            cosines=_wu_cos,
+                        )
+                    if self.ablation_cosine_mode == 'WARMUP_CALIB':
+                        self._warmup_cosine_history.extend(float(c) for c in _wu_cos)
+                        if server_round == self.warmup_rounds and self._warmup_cosine_history:
+                            self._cosine_threshold_locked = cosine_percentile_threshold(
+                                self._warmup_cosine_history, self.cos_warmup_percentile
+                            )
+                            self.layer2_detector.cosine_threshold = self._cosine_threshold_locked
+                            print(f"   [THRESH_COMPARE] WARMUP_CALIB cosine_threshold LOCKED = "
+                                  f"{self._cosine_threshold_locked:.4f} "
+                                  f"(p{self.cos_warmup_percentile} of {len(self._warmup_cosine_history)} "
+                                  f"warmup cosine samples)")
+                except Exception as _cos_wu_e:
+                    print(f"   [PROBE-COS] warmup record/calib failed: {_cos_wu_e}")
 
             agg_grad = self.aggregator.weighted_average(trusted_grads, trusted_reps)
             self._update_parameters(agg_grad, results[0][1].parameters)
-            
+
+            # [ABLATION] Warmup GDS anchor for WARMUP_STATIC mode (C2)
+            if (self.ablation_theta_mode == 'WARMUP_STATIC' and
+                    self.ablation_gds and len(trusted_grads) >= 3):
+                try:
+                    _dummy_ids = list(range(len(trusted_grads)))
+                    _wu_gds = self.noniid_handler.compute_gds(trusted_grads, _dummy_ids)
+                    self._warmup_gds_history.append(_wu_gds)
+                    if server_round == self.warmup_rounds and self._warmup_gds_history:
+                        self._warmup_gds_anchor = float(np.mean(self._warmup_gds_history))
+                        print(f"   [ABLATION] WARMUP_STATIC anchor set = {self._warmup_gds_anchor:.4f} "
+                              f"(mean over {len(self._warmup_gds_history)} warmup rounds)")
+                except Exception as _e:
+                    print(f"   [ABLATION] warmup GDS anchor failed: {_e}")
+
+            # [PROBE] Record warmup GDS components (trusted_grads = BENIGN_GT set)
+            if self._probe is not None:
+                self._probe.record_warmup(server_round, trusted_grads)
+                if server_round == self.warmup_rounds:
+                    self._probe.finalize_warmup()
+
             # Save Momentum from Warmup
             try:
                 if agg_grad is not None:
@@ -363,7 +482,7 @@ class FullPipelineStrategy(FedProx):
             print(f"   ✅ Warmup aggregation successful with {len(trusted_grads)} trusted clients")
             # Warmup: chưa có attacker nên GDS và H đều = 0
             print(f"   GDS=0.000 (Warmup) | H=0.000 (Warmup)")
-            self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0, 0.0)
+            self._calculate_metrics(server_round, [], [], [], 0.0, 0.0, 0.0, 0.0, theta_hard=None)
             if should_save: self._save_checkpoint(server_round)
             return self.current_parameters, {}
 
@@ -410,20 +529,21 @@ class FullPipelineStrategy(FedProx):
         
         # ═══════════════════════════════════════════════════════════════
         # ⚗️  VARIANT B: θ_adj theo GDS (Gradient Dispersion Score)
+        #     + ABLATION FLAGS (C0-C3)
         # ═══════════════════════════════════════════════════════════════
 
         # === Bước 1: Update client gradient history ===
         for local_idx, seq_id in enumerate(seq_cids):
             self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
 
-        # === Bước 2: Tính GDS (Gradient Dispersion Score) ===
-        # GDS đo sự phân tán hình học gradient → proxy môi trường non-IID
-        # → dùng cho θ_adj (filter threshold) + adaptive reference
-        GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids, current_round=server_round)
+        # === Bước 2: Tính GDS ===
+        if self.ablation_gds:
+            GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids, current_round=server_round)
+        else:
+            GDS = 0.5   # [ABLATION C3] GDS=OFF → constant midpoint (no adjustment)
+            print(f"   [ABLATION] GDS=OFF → GDS=0.5 (constant, no theta_adj effect)")
 
         # === Bước 3: Tính H (Behavioral Heterogeneity Score) ===
-        # H đo divergence hành vi (gradient direction + loss + accuracy)
-        # → dùng cho mode controller, reputation penalty
         losses_batch = [float(res.metrics["train_loss"])
                         for _, res in results if "train_loss" in res.metrics]
         accs_batch   = [float(res.metrics["train_accuracy"])
@@ -434,30 +554,63 @@ class FullPipelineStrategy(FedProx):
             accuracies=accs_batch if len(accs_batch) == len(full_gradients) else None
         )
         H = h_breakdown['H']
-        # Lưu breakdown để dùng trong _calculate_metrics
         self._last_h_breakdown = h_breakdown
 
-        # VARIANT B: theta_signal = GDS (dispersion) → điều chỉnh θ_adj
-        theta_signal = GDS
+        # === theta_signal (controls θ_adj in filter) ===
+        if self.ablation_theta_mode == 'WARMUP_STATIC':
+            theta_signal = self._warmup_gds_anchor   # [ABLATION C2/C3] fixed static anchor
+            print(f"   [ABLATION] theta_signal=WARMUP_STATIC={theta_signal:.4f}")
+        else:
+            theta_signal = GDS   # [C0/C1] VARIANT B: per-round GDS
 
-        print(f"\n   📊 [VARIANT B] GDS={GDS:.4f} | H={H:.4f} | θ_adj signal=GDS")
+        print(f"\n   📊 [VARIANT B] GDS={GDS:.4f} | H={H:.4f} | θ_adj signal={theta_signal:.4f} "
+              f"[mode={self.ablation_theta_mode}]")
         print(f"      h_grad={h_breakdown['h_grad']:.3f}  h_loss={h_breakdown['h_loss']:.3f}  h_acc={h_breakdown['h_acc']:.3f}")
         if not losses_batch or len(losses_batch) != len(full_gradients):
             print(f"      ⚠️  train_loss not in client metrics → h_loss=0 (fallback)")
 
-        # === Bước 4: Adaptive Reference dùng GDS (gradient environment) ===
-        if hasattr(self, 'adaptive_ref_tracker'):
+        # [PROBE] Capture historical_momentum NGAY TRƯỚC blend
+        _probe_momentum_snapshot = (
+            self.adaptive_ref_tracker.historical_momentum.copy()
+            if (hasattr(self, 'adaptive_ref_tracker') and
+                self.adaptive_ref_tracker.historical_momentum is not None)
+            else None
+        )
+
+        # === Bước 4: Reference vector ===
+        if self.ablation_alpha_blend and hasattr(self, 'adaptive_ref_tracker'):
+            # [C0] alpha_blend=ON: blend historical momentum with current median
             reference_vector = self.adaptive_ref_tracker.compute_adaptive_reference(
                 full_gradients,
-                h_score=GDS,        # GDS phản ánh gradient environment
+                h_score=GDS,
                 current_round=server_round
             )
         else:
+            # [C1/C2/C3] alpha_blend=OFF: use current-round coordinate median directly
             reference_vector = np.median(np.vstack(full_gradients), axis=0)
-            print("   🛡️  Using Current Round Coordinate Median as Reference")
+            print(f"   [ABLATION] alpha_blend=OFF → reference=current_median")
 
         # 1. Detection Layers
         l1_res = self.layer1_detector.detect(full_gradients, seq_cids, current_round=server_round, is_malicious_ground_truth=gt_malicious_batch)
+
+        # [THRESH_COMPARE] ROUND_ADAPTIVE: cosine_threshold = median(cos) - k*MAD(cos) of
+        # THIS round's own cosines (vs the SAME reference_vector Layer2Detector will use).
+        # Sets Layer2Detector.cosine_threshold BEFORE calling .detect() — this DOES change
+        # the real filtering decision (that's the point of this mode); FIXED/WARMUP_CALIB
+        # never touch it here, so they are completely unaffected.
+        if self.ablation_cosine_mode == 'ROUND_ADAPTIVE':
+            try:
+                _rd_dist, _rd_cos, _rd_ref = self.layer2_detector._compute_metrics(
+                    full_gradients, reference_vector=reference_vector
+                )
+                _round_thr = cosine_mad_threshold(_rd_cos, self.cos_round_k)
+                self.layer2_detector.cosine_threshold = _round_thr
+                print(f"   [THRESH_COMPARE] ROUND_ADAPTIVE cosine_threshold (round {server_round}) = "
+                      f"{_round_thr:.4f} (median-{self.cos_round_k}×MAD of {len(_rd_cos)} cosines)")
+            except Exception as _rd_e:
+                print(f"   [THRESH_COMPARE] ROUND_ADAPTIVE threshold compute failed: {_rd_e}")
+
+        self._last_cos_threshold_actual = self.layer2_detector.cosine_threshold
 
         l2_status, l2_suspicion = self.layer2_detector.detect(
             full_gradients,
@@ -483,7 +636,8 @@ class FullPipelineStrategy(FedProx):
             layer1_results=l1_res,
             layer2_status=l2_status,
             suspicion_levels=l2_suspicion,
-            baseline_deviations=baseline_deviations
+            baseline_deviations=baseline_deviations,
+            current_round=server_round,
         )
 
         # 4. Determine client status and update reputation
@@ -610,11 +764,113 @@ class FullPipelineStrategy(FedProx):
                              if client_statuses.get(seq_id) == ClientStatus.REJECTED}
         all_filtered = all_filtered | detection_rejected  # Union 2 sets
 
-        # Summary sau khi union với detection_rejected
+        # [PROBE-THR] Raw L1/L2 scores for threshold-portability analysis (logging only)
+        if self._threshold_probe is not None:
+            try:
+                self._threshold_probe.record_round(
+                    server_round=server_round,
+                    seq_cids=seq_cids,
+                    gt_malicious=gt_malicious_batch,
+                    layer1_detector=self.layer1_detector,
+                    layer2_detector=self.layer2_detector,
+                    final_rejected_set=detection_rejected,
+                )
+            except Exception as _thr_e:
+                print(f"   [PROBE-THR] record_round failed: {_thr_e}")
+
+        # [PROBE-MODE] Per-round DR/FPR/cosine-threshold summary for the Stage B
+        # cosine-mode comparison (logging only — reads decisions already made above).
+        if self._mode_round_probe is not None:
+            try:
+                _mp_tp = sum(1 for i, cid in enumerate(seq_cids) if gt_malicious_batch[i] and cid in detection_rejected)
+                _mp_fn = sum(1 for i, cid in enumerate(seq_cids) if gt_malicious_batch[i] and cid not in detection_rejected)
+                _mp_fp = sum(1 for i, cid in enumerate(seq_cids) if not gt_malicious_batch[i] and cid in detection_rejected)
+                _mp_tn = sum(1 for i, cid in enumerate(seq_cids) if not gt_malicious_batch[i] and cid not in detection_rejected)
+                _mp_dr = _mp_tp / (_mp_tp + _mp_fn) if (_mp_tp + _mp_fn) > 0 else None
+                _mp_fpr = _mp_fp / (_mp_fp + _mp_tn) if (_mp_fp + _mp_tn) > 0 else None
+
+                _mp_n_l1 = sum(1 for s in l1_res.values() if s == "REJECTED")
+                _mp_n_l2 = sum(1 for s in l2_status.values() if s == "REJECTED")
+
+                _mp_is_att = {seq_cids[i]: gt_malicious_batch[i] for i in range(len(seq_cids))}
+                _mp_decisions = self.layer2_detector.last_stats.get("decisions", [])
+                _mp_all_cos = [d["cosine"] for d in _mp_decisions]
+                _mp_benign_cos = [d["cosine"] for d in _mp_decisions if not _mp_is_att.get(d["client_id"], False)]
+                _mp_att_cos = [d["cosine"] for d in _mp_decisions if _mp_is_att.get(d["client_id"], False)]
+
+                import numpy as _mp_np
+                _mp_median = float(_mp_np.median(_mp_all_cos)) if _mp_all_cos else None
+                _mp_mad = float(_mp_np.median(_mp_np.abs(_mp_np.array(_mp_all_cos) - _mp_median))) if _mp_all_cos else None
+                _mp_benign_p5 = float(_mp_np.percentile(_mp_benign_cos, 5)) if _mp_benign_cos else None
+                _mp_att_p50 = float(_mp_np.percentile(_mp_att_cos, 50)) if _mp_att_cos else None
+
+                self._mode_round_probe.record_round(
+                    server_round=server_round,
+                    DR=_mp_dr, FPR=_mp_fpr,
+                    cos_threshold_actual=self._last_cos_threshold_actual,
+                    n_rejected_L1=_mp_n_l1, n_rejected_L2=_mp_n_l2,
+                    cos_median=_mp_median, cos_mad=_mp_mad,
+                    cos_benign_p5=_mp_benign_p5, cos_attacker_p50=_mp_att_p50,
+                )
+            except Exception as _mp_e:
+                print(f"   [PROBE-MODE] record_round failed: {_mp_e}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 🆕 GAS LAYER (Gradient Anomaly Splitting) — pure statistical filter,
+        # PARALLEL to L1/L2 (does not read/modify their state). Union-only:
+        # final_rejected = L1L2_rejected ∪ gas_flagged. Toggled by
+        # ablation.gas-enabled (G_OFF/G_ON), everything else in the pipeline
+        # above is untouched.
+        # ═══════════════════════════════════════════════════════════════════
+        l1l2_rejected = set(all_filtered)   # snapshot BEFORE GAS union
+        gas_flagged: Set[int] = set()
+        gas_diag = None
+        gas_flagged_count = None
+        gas_only_caught = None
+        gas_false_flag = None
+        if self.ablation_gas_enabled and len(full_gradients) >= 3:
+            gas_flagged, gas_score_info = gas_filter(
+                full_gradients, seq_cids,
+                p=self.gas_p, seed=self.gas_seed, k_gas=self.gas_k,
+                prefilter_keep_ratio=self.gas_prefilter_keep_ratio,
+            )
+            gas_diag = compute_gas_diagnostics(
+                gas_score_info['gas_scores'], gt_mal_dict, self.gas_k
+            )
+            all_filtered = all_filtered | gas_flagged  # UNION — never un-rejects an L1/L2 client
+
+            gas_flagged_count = len(gas_flagged)
+            gas_only_caught = sum(
+                1 for i, seq_id in enumerate(seq_cids)
+                if gt_malicious_batch[i] and seq_id in gas_flagged and seq_id not in l1l2_rejected
+            )
+            gas_false_flag = sum(
+                1 for i, seq_id in enumerate(seq_cids)
+                if not gt_malicious_batch[i] and seq_id in gas_flagged
+            )
+            print(f"\n   🧮 [GAS] flagged={gas_flagged_count}/{len(seq_cids)}  "
+                  f"median={gas_score_info['gas_score_median']:.4f}  mad={gas_score_info['gas_score_mad']:.4f}  "
+                  f"thr={gas_score_info['threshold']:.4f}  "
+                  f"gas_only_caught={gas_only_caught}  gas_false_flag={gas_false_flag}")
+
+            try:
+                import json as _json
+                _mpath = os.path.join(self.save_dir, "round_metrics.jsonl")
+                os.makedirs(self.save_dir, exist_ok=True)
+                with open(_mpath, "a") as _mf:
+                    _mf.write(_json.dumps({"type": "gas_diag", "round": server_round, **gas_diag}) + "\n")
+            except Exception:
+                pass
+
+        self._last_gas_flagged = gas_flagged
+        self._last_gas_diag = gas_diag
+
+        # Summary sau khi union với detection_rejected (+ GAS nếu bật)
         print(f"\n   🔒 Two-Stage Filter + Detection:")
         print(f"      Hard Filter:              {len(hard_filtered):3d} clients")
         print(f"      Soft Filter:              {len(soft_filtered):3d} clients")
         print(f"      Detection Rejected (L1+L2):{len(detection_rejected):3d} clients")
+        print(f"      GAS Flagged:              {len(gas_flagged):3d} clients")
         print(f"      ─────────────────────────────")
         print(f"      Total Filtered:           {len(all_filtered):3d} / {len(seq_cids)} clients")
         
@@ -652,25 +908,76 @@ class FullPipelineStrategy(FedProx):
         except Exception as e:
             print(f"   ⚠️ Warning: Momentum update failed: {e}")
             
-        # === Update adaptive reference momentum với clean aggregated gradient ===
-        if hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
+        # === Update adaptive reference momentum (only when alpha_blend=ON) ===
+        if self.ablation_alpha_blend and hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
             self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
 
         # 8. Metrics Calculation
-        self._calculate_metrics(
-            server_round, 
-            seq_cids, 
-            gt_malicious_batch, 
+        _DR_log = self._calculate_metrics(
+            server_round,
+            seq_cids,
+            gt_malicious_batch,
             all_filtered,
             H,
             GDS,
             threat_ratio,
-            time.time() - start_time
+            time.time() - start_time,
+            theta_hard=filter_stats.get('theta_hard'),
+            gas_flagged_count=gas_flagged_count,
+            gas_only_caught=gas_only_caught,
+            gas_false_flag=gas_false_flag,
         )
-        
-        if should_save: 
+
+        # [PROBE] Record post-warmup instrumentation (logging only, no defense change)
+        if self._probe is not None:
+            _p_tp = _p_fp = _p_fn = _p_tn = 0
+            for _pi, _sid in enumerate(seq_cids):
+                _im = gt_malicious_batch[_pi]
+                _id = _sid in all_filtered
+                if _im and _id:       _p_tp += 1
+                elif _im:             _p_fn += 1
+                elif _id:             _p_fp += 1
+                else:                 _p_tn += 1
+            _p_prec = _p_tp / (_p_tp + _p_fp) if (_p_tp + _p_fp) > 0 else 0.0
+            _p_rec  = _p_tp / (_p_tp + _p_fn) if (_p_tp + _p_fn) > 0 else 0.0
+            _p_fpr  = _p_fp / (_p_fp + _p_tn) if (_p_fp + _p_tn) > 0 else 0.0
+            _alpha_blend = (self.adaptive_ref_tracker.last_alpha_used
+                            if hasattr(self, 'adaptive_ref_tracker') else 0.0)
+            self._probe.record_round(
+                server_round=server_round,
+                full_gradients=full_gradients,
+                seq_cids=seq_cids,
+                all_filtered=all_filtered,
+                GDS_prefilter_norm=GDS,
+                alpha_blend_used=_alpha_blend,
+                precision=_p_prec,
+                recall=_p_rec,
+                fpr=_p_fpr,
+            )
+            self._probe.dump_gas_npy(server_round, full_gradients, seq_cids, all_filtered,
+                                         client_statuses=client_statuses)
+            self._probe.dump_momentum_npy(
+                server_round, full_gradients, seq_cids, _probe_momentum_snapshot
+            )
+
+        # [PROBE-AB] A/B inline analysis (no .npy, CSV only)
+        if self._probe_ab is not None:
+            try:
+                self._probe_ab.record_ab_round(
+                    server_round=server_round,
+                    full_gradients=full_gradients,
+                    seq_cids=seq_cids,
+                    gt_malicious_batch=gt_malicious_batch,
+                    all_filtered=all_filtered,
+                    DR_log=_DR_log if _DR_log is not None else 0.0,
+                    historical_momentum=_probe_momentum_snapshot,
+                )
+            except Exception as _pab_exc:
+                print(f"   [PROBE-AB] ERROR r{server_round}: {_pab_exc}")
+
+        if should_save:
             self._save_checkpoint(server_round)
-        
+
         print(f"⏱️ [ROUND {server_round}] Server Processing Time: {time.time() - start_time:.4f}s")
         return self.current_parameters, {}
 
@@ -702,19 +1009,16 @@ class FullPipelineStrategy(FedProx):
         # Cập nhật tham số toàn cục mới
         self.current_parameters = ndarrays_to_parameters(new_params)
         
-    def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, GDS, threat_ratio, elapsed):
+    def _calculate_metrics(self, server_round, seq_cids, gt_malicious, detected, H, GDS, threat_ratio, elapsed, theta_hard=None,
+                            gas_flagged_count=None, gas_only_caught=None, gas_false_flag=None) -> float:
         """
         Calculate and print detection metrics.
-
-        Output includes:
-        - Human-readable metrics (Precision, Recall, F1, FPR as percentages)
-        - Machine-parseable summary line for automation scripts
-        - GDS and H scores with component breakdown
+        Returns detection_rate (recall = TP/(TP+FN)) for downstream probe use.
         """
         if not seq_cids:
             print(f"\n📊 METRICS ROUND {server_round}")
             print(f"   (Warmup - No detection metrics)")
-            return
+            return 0.0
             
         tp = fp = fn = tn = 0
         
@@ -752,6 +1056,22 @@ class FullPipelineStrategy(FedProx):
         
         # 🆕 Machine-parseable summary line (for run_param_tests.py)
         print(f"   [METRICS] Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}, FPR={fpr:.4f}")
+        # Write to file — print() may not reach captured stdout inside Ray actors
+        try:
+            import json as _json
+            _mpath = os.path.join(self.save_dir, "round_metrics.jsonl")
+            os.makedirs(self.save_dir, exist_ok=True)
+            with open(_mpath, "a") as _mf:
+                _mf.write(_json.dumps({
+                    "type": "detection", "round": server_round,
+                    "DR": float(detection_rate), "FPR": float(fpr),
+                    "theta_adj_hard": (float(theta_hard) if theta_hard is not None else None),
+                    "gas_flagged_count": gas_flagged_count,
+                    "gas_only_caught": gas_only_caught,
+                    "gas_false_flag": gas_false_flag,
+                }) + "\n")
+        except Exception:
+            pass
 
         # GDS và H score — in rõ nguồn gốc và component breakdown
         print(f"   H={H:.4f}, GDS={GDS:.4f}, Threat Ratio={threat_ratio:.2%}")
@@ -769,6 +1089,8 @@ class FullPipelineStrategy(FedProx):
             detected_mal = [seq_cids[i] for i in mal_indices if seq_cids[i] in detected]
             print(f"   True Positives: {len(detected_mal)}/{len(mal_indices)} malicious detected")
 
+        return detection_rate
+
     def _save_checkpoint(self, server_round):
         if not self.auto_save or self.current_parameters is None:
             return
@@ -785,6 +1107,22 @@ class FullPipelineStrategy(FedProx):
             print(f"   💾 Saved checkpoint: {path}")
         except Exception as e:
             print(f"❌ Error saving checkpoint: {e}")
+
+    def aggregate_evaluate(self, server_round, results, failures):
+        loss_aggregated, metrics_aggregated = super().aggregate_evaluate(server_round, results, failures)
+        if metrics_aggregated and "accuracy" in metrics_aggregated:
+            try:
+                import json as _json
+                _mpath = os.path.join(self.save_dir, "round_metrics.jsonl")
+                os.makedirs(self.save_dir, exist_ok=True)
+                with open(_mpath, "a") as _mf:
+                    _mf.write(_json.dumps({
+                        "type": "accuracy", "round": server_round,
+                        "accuracy": float(metrics_aggregated["accuracy"]),
+                    }) + "\n")
+            except Exception:
+                pass
+        return loss_aggregated, metrics_aggregated
 
 def server_fn(context: Context) -> ServerAppComponents:
     num_rounds = int(context.run_config.get("num-server-rounds", 50))
@@ -894,6 +1232,36 @@ def server_fn(context: Context) -> ServerAppComponents:
             'min_history_rounds': int(context.run_config.get("defense.adaptive-reference.min-history-rounds", 3)),
         }
     
+    # Ablation flags
+    _ab_blend = context.run_config.get("ablation.alpha-blend-enabled", True)
+    if isinstance(_ab_blend, str): _ab_blend = _ab_blend.lower() != 'false'
+    ablation_alpha_blend = bool(_ab_blend)
+
+    ablation_theta_mode = str(context.run_config.get("ablation.theta-signal-mode", "GDS_PERROUND"))
+
+    _ab_gds = context.run_config.get("ablation.gds-enabled", True)
+    if isinstance(_ab_gds, str): _ab_gds = _ab_gds.lower() != 'false'
+    ablation_gds = bool(_ab_gds)
+
+    # 🆕 GAS ablation flag (G_OFF/G_ON) + GAS layer params
+    _ab_gas = context.run_config.get("ablation.gas-enabled", False)
+    if isinstance(_ab_gas, str): _ab_gas = _ab_gas.lower() == 'true'
+    ablation_gas_enabled = bool(_ab_gas)
+
+    gas_p = int(context.run_config.get("defense.gas.p-chunks", 10))
+    gas_seed = int(context.run_config.get("defense.gas.chunk-seed", 1234))
+    gas_k = float(context.run_config.get("defense.gas.k-gas", 2.5))
+    gas_prefilter_keep_ratio = float(context.run_config.get("defense.gas.prefilter-keep-ratio", 0.7))
+
+    # 🆕 THRESH_COMPARE: L2 cosine threshold mode
+    ablation_cosine_mode = str(context.run_config.get("ablation.cosine-threshold-mode", "FIXED"))
+    cos_warmup_percentile = float(context.run_config.get("defense.layer2.cos-warmup-percentile", 5.0))
+    cos_round_k = float(context.run_config.get("defense.layer2.cos-round-k", 2.5))
+
+    print(f"   [ABLATION] alpha_blend={ablation_alpha_blend}  theta_mode={ablation_theta_mode}  gds={ablation_gds}  "
+          f"gas={ablation_gas_enabled} (p={gas_p} seed={gas_seed} k={gas_k} keep_ratio={gas_prefilter_keep_ratio})  "
+          f"cosine_mode={ablation_cosine_mode} (warmup_pct={cos_warmup_percentile} round_k={cos_round_k})")
+
     dataset_name = context.run_config.get("dataset", "cifar-10")
 
     config_metadata = {
@@ -943,11 +1311,152 @@ def server_fn(context: Context) -> ServerAppComponents:
         start_round=0,
         enable_defense=enable_defense,
         defense_params=defense_params,
-        warmup_rounds=warmup_rounds
+        warmup_rounds=warmup_rounds,
+        ablation_alpha_blend=ablation_alpha_blend,
+        ablation_theta_mode=ablation_theta_mode,
+        ablation_gds=ablation_gds,
+        ablation_gas_enabled=ablation_gas_enabled,
+        gas_p=gas_p,
+        gas_seed=gas_seed,
+        gas_k=gas_k,
+        gas_prefilter_keep_ratio=gas_prefilter_keep_ratio,
+        ablation_cosine_mode=ablation_cosine_mode,
+        cos_warmup_percentile=cos_warmup_percentile,
+        cos_round_k=cos_round_k,
     )
-    
+
+    # [SEED] Optional deterministic seed (set by run_instrumentation_AB.py via env var)
+    _sim_seed = int(context.run_config.get("simulation-seed", 0))
+    if _sim_seed > 0:
+        import random as _rnd
+        _rnd.seed(_sim_seed)
+        np.random.seed(_sim_seed)
+        torch.manual_seed(_sim_seed)
+        print(f"   [SEED] simulation-seed={_sim_seed} set for numpy/random/torch")
+
+    # [PROBE] Initialize GDSProbe for instrumentation (logging only — no defense change)
+    # GDSProbe's version_snapshot ABORTs for non-CIFAR datasets (it was built around
+    # GDS_NORM_RANGES_CIFAR10, a CIFAR-10-specific reference table) — skip attachment
+    # gracefully for other datasets (e.g. fashion-mnist) instead of crashing the whole
+    # run over an optional, read-only logging module.
+    if enable_defense and "cifar" not in dataset_name.lower():
+        print(f"   [PROBE] GDSProbe skipped — CIFAR-10-specific instrumentation, dataset={dataset_name}")
+    elif enable_defense:
+        import atexit
+        from cifar_cnn.instrumentation import GDSProbe, GDSProbeAB, write_version_snapshot
+        probe_dir = os.path.join("instrument", f"{attack_type}_a{alpha}")
+        try:
+            write_version_snapshot(
+                output_dir=probe_dir,
+                attack=attack_type,
+                alpha=alpha,
+                dataset=dataset_name,
+                cosine_threshold=float(context.run_config.get(
+                    "defense.layer2.cosine-threshold", 0.8)),
+                k_reject=float(context.run_config.get(
+                    "defense.layer1.mad-k-reject", 4.0)),
+                distance_multiplier=float(context.run_config.get(
+                    "defense.layer2.distance-multiplier", 2.5)),
+                weight_baseline=float(context.run_config.get(
+                    "defense.confidence.weight-baseline", 0.3)),
+                defense_params=defense_params,
+            )
+            probe = GDSProbe(
+                attack=attack_type,
+                alpha=alpha,
+                output_dir=probe_dir,
+                noniid_handler=strategy.noniid_handler,
+            )
+            strategy._probe = probe
+            atexit.register(probe.close)
+            print(f"   [PROBE] GDSProbe active → {probe_dir}")
+        except RuntimeError as _abort_err:
+            print(f"\n{'='*70}")
+            print(f"❌ ABORT: {_abort_err}")
+            print(f"{'='*70}\n")
+            raise
+
+        # [PROBE-AB] GDSProbeAB — activated by INSTRUMENT_AB_OUTDIR env var
+        _ab_outdir = os.environ.get("INSTRUMENT_AB_OUTDIR", "").strip()
+        if _ab_outdir:
+            try:
+                probe_ab = GDSProbeAB(
+                    attack=attack_type,
+                    alpha=alpha,
+                    output_dir=_ab_outdir,
+                )
+                strategy._probe_ab = probe_ab
+                atexit.register(probe_ab.close)
+                print(f"   [PROBE-AB] GDSProbeAB active → {_ab_outdir}")
+            except Exception as _pab_init_err:
+                print(f"   [PROBE-AB] init failed: {_pab_init_err}")
+
+    # [PROBE-THR] ThresholdProbe — activated by THRESHOLD_PROBE_OUTPUT env var.
+    # Dataset-agnostic (unlike GDSProbe): only reads generic Layer1/Layer2 detector
+    # state, no CIFAR-specific reference tables — works for fashion-mnist too.
+    if enable_defense:
+        _thr_outpath = os.environ.get("THRESHOLD_PROBE_OUTPUT", "").strip()
+        if _thr_outpath:
+            import atexit as _atexit_thr
+            from cifar_cnn.threshold_probe import ThresholdProbe
+            try:
+                thr_probe = ThresholdProbe(
+                    dataset=dataset_name,
+                    attack=attack_type,
+                    alpha=alpha,
+                    seed=int(context.run_config.get("simulation-seed", 0)),
+                    output_path=_thr_outpath,
+                )
+                strategy._threshold_probe = thr_probe
+                _atexit_thr.register(thr_probe.close)
+                print(f"   [PROBE-THR] ThresholdProbe active → {_thr_outpath}")
+            except Exception as _thr_init_err:
+                print(f"   [PROBE-THR] init failed: {_thr_init_err}")
+
+    # [PROBE-COS] WarmupCosineProbe — activated by WARMUP_COSINE_PROBE_OUTPUT env var.
+    # Dataset-agnostic, warmup-only, record-only (see A0/A1 in THRESH_COMPARE project).
+    if enable_defense:
+        _cos_outpath = os.environ.get("WARMUP_COSINE_PROBE_OUTPUT", "").strip()
+        if _cos_outpath:
+            import atexit as _atexit_cos
+            from cifar_cnn.warmup_cosine_probe import WarmupCosineProbe
+            try:
+                cos_probe = WarmupCosineProbe(
+                    dataset=dataset_name,
+                    alpha=alpha,
+                    seed=int(context.run_config.get("simulation-seed", 0)),
+                    output_path=_cos_outpath,
+                )
+                strategy._warmup_cosine_probe = cos_probe
+                _atexit_cos.register(cos_probe.close)
+                print(f"   [PROBE-COS] WarmupCosineProbe active → {_cos_outpath}")
+            except Exception as _cos_init_err:
+                print(f"   [PROBE-COS] init failed: {_cos_init_err}")
+
+    # [PROBE-MODE] ModeRoundProbe — activated by MODE_ROUND_PROBE_OUTPUT env var
+    # (Stage B cosine-threshold-mode comparison).
+    if enable_defense:
+        _mode_outpath = os.environ.get("MODE_ROUND_PROBE_OUTPUT", "").strip()
+        if _mode_outpath:
+            import atexit as _atexit_mode
+            from cifar_cnn.mode_round_probe import ModeRoundProbe
+            try:
+                mode_probe = ModeRoundProbe(
+                    mode=ablation_cosine_mode,
+                    dataset=dataset_name,
+                    attack=attack_type,
+                    alpha=alpha,
+                    seed=int(context.run_config.get("simulation-seed", 0)),
+                    output_path=_mode_outpath,
+                )
+                strategy._mode_round_probe = mode_probe
+                _atexit_mode.register(mode_probe.close)
+                print(f"   [PROBE-MODE] ModeRoundProbe active → {_mode_outpath}")
+            except Exception as _mode_init_err:
+                print(f"   [PROBE-MODE] init failed: {_mode_init_err}")
+
     config = ServerConfig(num_rounds=num_rounds)
-    
+
     return ServerAppComponents(strategy=strategy, config=config)
     
 app = ServerApp(server_fn=server_fn)
