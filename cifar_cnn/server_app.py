@@ -48,7 +48,6 @@ from cifar_cnn.defense import (
 # BehavioralScorer nằm trong noniid_handler.py
 from cifar_cnn.defense.noniid_handler import BehavioralScorer
 from cifar_cnn.defense.reputation import ClientStatus
-from cifar_cnn.defense.adaptive_reference import AdaptiveReferenceTracker
 from cifar_cnn.defense.gas_filter import gas_filter, compute_gas_diagnostics
 from cifar_cnn.defense.layer2_detection import cosine_percentile_threshold, cosine_mad_threshold
 
@@ -75,9 +74,6 @@ class FullPipelineStrategy(FedProx):
                  enable_defense=False,
                  defense_params=None,
                  warmup_rounds=10,
-                 ablation_alpha_blend=True,
-                 ablation_theta_mode='GDS_PERROUND',
-                 ablation_gds=True,
                  ablation_gas_enabled=False,
                  gas_p=10,
                  gas_seed=1234,
@@ -109,10 +105,6 @@ class FullPipelineStrategy(FedProx):
         self.defense_params = defense_params or {}
         self.warmup_rounds = int(warmup_rounds)
 
-        # Ablation flags
-        self.ablation_alpha_blend = bool(ablation_alpha_blend)
-        self.ablation_theta_mode = str(ablation_theta_mode)   # 'GDS_PERROUND' | 'WARMUP_STATIC'
-        self.ablation_gds = bool(ablation_gds)
         self._warmup_gds_history = []   # accumulate warmup GDS for WARMUP_STATIC anchor
         self._warmup_gds_anchor = 0.5   # default anchor when GDS disabled
 
@@ -145,8 +137,6 @@ class FullPipelineStrategy(FedProx):
 
         self.previous_full_grad = None
         self.warmup_client_proxies = None # cố định client proxies trong warmup
-        self._probe = None  # [PROBE] GDSProbe instance, set by server_fn (logging only)
-        self._probe_ab = None  # [PROBE-AB] GDSProbeAB instance for A/B analysis
         self._threshold_probe = None  # [PROBE-THR] ThresholdProbe (L1/L2 raw scores, logging only)
         self._warmup_cosine_probe = None  # [PROBE-COS] WarmupCosineProbe (warmup L2 cosine, logging only)
         self._mode_round_probe = None  # [PROBE-MODE] ModeRoundProbe (per-round DR/FPR/cos stats, logging only)
@@ -159,8 +149,6 @@ class FullPipelineStrategy(FedProx):
             print("🛡️  HYBRID DEFENSE V2: SOFT PIPELINE ACTIVATED (FULL MODEL MODE)")
             print(f"   Save Interval: {self.save_interval} rounds")
             print(f"   Auto Save: {self.auto_save}")
-            print(f"   [ABLATION] alpha_blend={self.ablation_alpha_blend}  "
-                  f"theta_mode={self.ablation_theta_mode}  gds={self.ablation_gds}")
             print("="*70)
             self._initialize_defense_components()
     
@@ -198,19 +186,8 @@ class FullPipelineStrategy(FedProx):
         )
         
         self.aggregator = Aggregator(**self.defense_params.get('aggregation', {}))
-        
-        adaptive_ref_params = self.defense_params.get('adaptive_reference', {})
-        self.adaptive_ref_tracker = AdaptiveReferenceTracker(
-            alpha_base=adaptive_ref_params.get('alpha_base', 0.2),
-            alpha_h_mult=adaptive_ref_params.get('alpha_h_mult', 0.5),
-            alpha_min=adaptive_ref_params.get('alpha_min', 0.1),
-            alpha_max=adaptive_ref_params.get('alpha_max', 0.8),
-            momentum_decay=adaptive_ref_params.get('momentum_decay', 0.9),
-            warmup_rounds=self.warmup_rounds,
-            min_history_rounds=adaptive_ref_params.get('min_history_rounds', 3)
-        )
 
-    
+
     def _identify_malicious_clients(self) -> Set[int]:
         return set()
 
@@ -445,9 +422,9 @@ class FullPipelineStrategy(FedProx):
             agg_grad = self.aggregator.weighted_average(trusted_grads, trusted_reps)
             self._update_parameters(agg_grad, results[0][1].parameters)
 
-            # [ABLATION] Warmup GDS anchor for WARMUP_STATIC mode (C2)
-            if (self.ablation_theta_mode == 'WARMUP_STATIC' and
-                    self.ablation_gds and len(trusted_grads) >= 3):
+            # Warmup GDS anchor for WARMUP_STATIC theta_signal (always computed —
+            # θ_adj filtering depends on this anchor).
+            if len(trusted_grads) >= 3:
                 try:
                     _dummy_ids = list(range(len(trusted_grads)))
                     _wu_gds = self.noniid_handler.compute_gds(trusted_grads, _dummy_ids)
@@ -459,12 +436,6 @@ class FullPipelineStrategy(FedProx):
                 except Exception as _e:
                     print(f"   [ABLATION] warmup GDS anchor failed: {_e}")
 
-            # [PROBE] Record warmup GDS components (trusted_grads = BENIGN_GT set)
-            if self._probe is not None:
-                self._probe.record_warmup(server_round, trusted_grads)
-                if server_round == self.warmup_rounds:
-                    self._probe.finalize_warmup()
-
             # Save Momentum from Warmup
             try:
                 if agg_grad is not None:
@@ -474,11 +445,7 @@ class FullPipelineStrategy(FedProx):
                          self.previous_full_grad = agg_grad.flatten()
             except Exception as e:
                 print(f"   ⚠️ Warning: Momentum update failed in Warmup: {e}")
-            
-             # === adaptive reference momentum với clean warmup gradient ===
-            if hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
-                self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
-            
+
             print(f"   ✅ Warmup aggregation successful with {len(trusted_grads)} trusted clients")
             # Warmup: chưa có attacker nên GDS và H đều = 0
             print(f"   GDS=0.000 (Warmup) | H=0.000 (Warmup)")
@@ -529,7 +496,6 @@ class FullPipelineStrategy(FedProx):
         
         # ═══════════════════════════════════════════════════════════════
         # ⚗️  VARIANT B: θ_adj theo GDS (Gradient Dispersion Score)
-        #     + ABLATION FLAGS (C0-C3)
         # ═══════════════════════════════════════════════════════════════
 
         # === Bước 1: Update client gradient history ===
@@ -537,11 +503,7 @@ class FullPipelineStrategy(FedProx):
             self.noniid_handler.update_client_gradient(seq_id, full_gradients[local_idx])
 
         # === Bước 2: Tính GDS ===
-        if self.ablation_gds:
-            GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids, current_round=server_round)
-        else:
-            GDS = 0.5   # [ABLATION C3] GDS=OFF → constant midpoint (no adjustment)
-            print(f"   [ABLATION] GDS=OFF → GDS=0.5 (constant, no theta_adj effect)")
+        GDS = self.noniid_handler.compute_gds(full_gradients, seq_cids, current_round=server_round)
 
         # === Bước 3: Tính H (Behavioral Heterogeneity Score) ===
         losses_batch = [float(res.metrics["train_loss"])
@@ -557,38 +519,16 @@ class FullPipelineStrategy(FedProx):
         self._last_h_breakdown = h_breakdown
 
         # === theta_signal (controls θ_adj in filter) ===
-        if self.ablation_theta_mode == 'WARMUP_STATIC':
-            theta_signal = self._warmup_gds_anchor   # [ABLATION C2/C3] fixed static anchor
-            print(f"   [ABLATION] theta_signal=WARMUP_STATIC={theta_signal:.4f}")
-        else:
-            theta_signal = GDS   # [C0/C1] VARIANT B: per-round GDS
+        theta_signal = self._warmup_gds_anchor   # WARMUP_STATIC: fixed anchor from warmup
+        print(f"   [ABLATION] theta_signal=WARMUP_STATIC={theta_signal:.4f}")
 
-        print(f"\n   📊 [VARIANT B] GDS={GDS:.4f} | H={H:.4f} | θ_adj signal={theta_signal:.4f} "
-              f"[mode={self.ablation_theta_mode}]")
+        print(f"\n   📊 [VARIANT B] GDS={GDS:.4f} | H={H:.4f} | θ_adj signal={theta_signal:.4f}")
         print(f"      h_grad={h_breakdown['h_grad']:.3f}  h_loss={h_breakdown['h_loss']:.3f}  h_acc={h_breakdown['h_acc']:.3f}")
         if not losses_batch or len(losses_batch) != len(full_gradients):
             print(f"      ⚠️  train_loss not in client metrics → h_loss=0 (fallback)")
 
-        # [PROBE] Capture historical_momentum NGAY TRƯỚC blend
-        _probe_momentum_snapshot = (
-            self.adaptive_ref_tracker.historical_momentum.copy()
-            if (hasattr(self, 'adaptive_ref_tracker') and
-                self.adaptive_ref_tracker.historical_momentum is not None)
-            else None
-        )
-
         # === Bước 4: Reference vector ===
-        if self.ablation_alpha_blend and hasattr(self, 'adaptive_ref_tracker'):
-            # [C0] alpha_blend=ON: blend historical momentum with current median
-            reference_vector = self.adaptive_ref_tracker.compute_adaptive_reference(
-                full_gradients,
-                h_score=GDS,
-                current_round=server_round
-            )
-        else:
-            # [C1/C2/C3] alpha_blend=OFF: use current-round coordinate median directly
-            reference_vector = np.median(np.vstack(full_gradients), axis=0)
-            print(f"   [ABLATION] alpha_blend=OFF → reference=current_median")
+        reference_vector = np.median(np.vstack(full_gradients), axis=0)
 
         # 1. Detection Layers
         l1_res = self.layer1_detector.detect(full_gradients, seq_cids, current_round=server_round, is_malicious_ground_truth=gt_malicious_batch)
@@ -907,10 +847,6 @@ class FullPipelineStrategy(FedProx):
                     self.previous_full_grad = agg_grad.flatten()
         except Exception as e:
             print(f"   ⚠️ Warning: Momentum update failed: {e}")
-            
-        # === Update adaptive reference momentum (only when alpha_blend=ON) ===
-        if self.ablation_alpha_blend and hasattr(self, 'adaptive_ref_tracker') and agg_grad is not None:
-            self.adaptive_ref_tracker.update_momentum(agg_grad, server_round)
 
         # 8. Metrics Calculation
         _DR_log = self._calculate_metrics(
@@ -927,53 +863,6 @@ class FullPipelineStrategy(FedProx):
             gas_only_caught=gas_only_caught,
             gas_false_flag=gas_false_flag,
         )
-
-        # [PROBE] Record post-warmup instrumentation (logging only, no defense change)
-        if self._probe is not None:
-            _p_tp = _p_fp = _p_fn = _p_tn = 0
-            for _pi, _sid in enumerate(seq_cids):
-                _im = gt_malicious_batch[_pi]
-                _id = _sid in all_filtered
-                if _im and _id:       _p_tp += 1
-                elif _im:             _p_fn += 1
-                elif _id:             _p_fp += 1
-                else:                 _p_tn += 1
-            _p_prec = _p_tp / (_p_tp + _p_fp) if (_p_tp + _p_fp) > 0 else 0.0
-            _p_rec  = _p_tp / (_p_tp + _p_fn) if (_p_tp + _p_fn) > 0 else 0.0
-            _p_fpr  = _p_fp / (_p_fp + _p_tn) if (_p_fp + _p_tn) > 0 else 0.0
-            _alpha_blend = (self.adaptive_ref_tracker.last_alpha_used
-                            if hasattr(self, 'adaptive_ref_tracker') else 0.0)
-            self._probe.record_round(
-                server_round=server_round,
-                full_gradients=full_gradients,
-                seq_cids=seq_cids,
-                all_filtered=all_filtered,
-                GDS_prefilter_norm=GDS,
-                alpha_blend_used=_alpha_blend,
-                precision=_p_prec,
-                recall=_p_rec,
-                fpr=_p_fpr,
-            )
-            self._probe.dump_gas_npy(server_round, full_gradients, seq_cids, all_filtered,
-                                         client_statuses=client_statuses)
-            self._probe.dump_momentum_npy(
-                server_round, full_gradients, seq_cids, _probe_momentum_snapshot
-            )
-
-        # [PROBE-AB] A/B inline analysis (no .npy, CSV only)
-        if self._probe_ab is not None:
-            try:
-                self._probe_ab.record_ab_round(
-                    server_round=server_round,
-                    full_gradients=full_gradients,
-                    seq_cids=seq_cids,
-                    gt_malicious_batch=gt_malicious_batch,
-                    all_filtered=all_filtered,
-                    DR_log=_DR_log if _DR_log is not None else 0.0,
-                    historical_momentum=_probe_momentum_snapshot,
-                )
-            except Exception as _pab_exc:
-                print(f"   [PROBE-AB] ERROR r{server_round}: {_pab_exc}")
 
         if should_save:
             self._save_checkpoint(server_round)
@@ -1222,26 +1111,6 @@ def server_fn(context: Context) -> ServerAppComponents:
             'use_reputation_weights': context.run_config.get("defense.aggregation.use-reputation-weights", True),
             'uniform_weight_fallback': context.run_config.get("defense.aggregation.uniform-weight-fallback", True)
         }
-        
-        defense_params['adaptive_reference'] = {
-            'alpha_base': float(context.run_config.get("defense.adaptive-reference.alpha-base", 0.2)),
-            'alpha_h_mult': float(context.run_config.get("defense.adaptive-reference.alpha-h-mult", 0.5)),
-            'alpha_min': float(context.run_config.get("defense.adaptive-reference.alpha-min", 0.1)),
-            'alpha_max': float(context.run_config.get("defense.adaptive-reference.alpha-max", 0.8)),
-            'momentum_decay': float(context.run_config.get("defense.adaptive-reference.momentum-decay", 0.9)),
-            'min_history_rounds': int(context.run_config.get("defense.adaptive-reference.min-history-rounds", 3)),
-        }
-    
-    # Ablation flags
-    _ab_blend = context.run_config.get("ablation.alpha-blend-enabled", True)
-    if isinstance(_ab_blend, str): _ab_blend = _ab_blend.lower() != 'false'
-    ablation_alpha_blend = bool(_ab_blend)
-
-    ablation_theta_mode = str(context.run_config.get("ablation.theta-signal-mode", "GDS_PERROUND"))
-
-    _ab_gds = context.run_config.get("ablation.gds-enabled", True)
-    if isinstance(_ab_gds, str): _ab_gds = _ab_gds.lower() != 'false'
-    ablation_gds = bool(_ab_gds)
 
     # 🆕 GAS ablation flag (G_OFF/G_ON) + GAS layer params
     _ab_gas = context.run_config.get("ablation.gas-enabled", False)
@@ -1258,8 +1127,7 @@ def server_fn(context: Context) -> ServerAppComponents:
     cos_warmup_percentile = float(context.run_config.get("defense.layer2.cos-warmup-percentile", 5.0))
     cos_round_k = float(context.run_config.get("defense.layer2.cos-round-k", 2.5))
 
-    print(f"   [ABLATION] alpha_blend={ablation_alpha_blend}  theta_mode={ablation_theta_mode}  gds={ablation_gds}  "
-          f"gas={ablation_gas_enabled} (p={gas_p} seed={gas_seed} k={gas_k} keep_ratio={gas_prefilter_keep_ratio})  "
+    print(f"   [ABLATION] gas={ablation_gas_enabled} (p={gas_p} seed={gas_seed} k={gas_k} keep_ratio={gas_prefilter_keep_ratio})  "
           f"cosine_mode={ablation_cosine_mode} (warmup_pct={cos_warmup_percentile} round_k={cos_round_k})")
 
     dataset_name = context.run_config.get("dataset", "cifar-10")
@@ -1312,9 +1180,6 @@ def server_fn(context: Context) -> ServerAppComponents:
         enable_defense=enable_defense,
         defense_params=defense_params,
         warmup_rounds=warmup_rounds,
-        ablation_alpha_blend=ablation_alpha_blend,
-        ablation_theta_mode=ablation_theta_mode,
-        ablation_gds=ablation_gds,
         ablation_gas_enabled=ablation_gas_enabled,
         gas_p=gas_p,
         gas_seed=gas_seed,
@@ -1325,7 +1190,7 @@ def server_fn(context: Context) -> ServerAppComponents:
         cos_round_k=cos_round_k,
     )
 
-    # [SEED] Optional deterministic seed (set by run_instrumentation_AB.py via env var)
+    # [SEED] Optional deterministic seed (set via simulation-seed run_config key)
     _sim_seed = int(context.run_config.get("simulation-seed", 0))
     if _sim_seed > 0:
         import random as _rnd
@@ -1334,66 +1199,9 @@ def server_fn(context: Context) -> ServerAppComponents:
         torch.manual_seed(_sim_seed)
         print(f"   [SEED] simulation-seed={_sim_seed} set for numpy/random/torch")
 
-    # [PROBE] Initialize GDSProbe for instrumentation (logging only — no defense change)
-    # GDSProbe's version_snapshot ABORTs for non-CIFAR datasets (it was built around
-    # GDS_NORM_RANGES_CIFAR10, a CIFAR-10-specific reference table) — skip attachment
-    # gracefully for other datasets (e.g. fashion-mnist) instead of crashing the whole
-    # run over an optional, read-only logging module.
-    if enable_defense and "cifar" not in dataset_name.lower():
-        print(f"   [PROBE] GDSProbe skipped — CIFAR-10-specific instrumentation, dataset={dataset_name}")
-    elif enable_defense:
-        import atexit
-        from cifar_cnn.instrumentation import GDSProbe, GDSProbeAB, write_version_snapshot
-        probe_dir = os.path.join("instrument", f"{attack_type}_a{alpha}")
-        try:
-            write_version_snapshot(
-                output_dir=probe_dir,
-                attack=attack_type,
-                alpha=alpha,
-                dataset=dataset_name,
-                cosine_threshold=float(context.run_config.get(
-                    "defense.layer2.cosine-threshold", 0.8)),
-                k_reject=float(context.run_config.get(
-                    "defense.layer1.mad-k-reject", 4.0)),
-                distance_multiplier=float(context.run_config.get(
-                    "defense.layer2.distance-multiplier", 2.5)),
-                weight_baseline=float(context.run_config.get(
-                    "defense.confidence.weight-baseline", 0.3)),
-                defense_params=defense_params,
-            )
-            probe = GDSProbe(
-                attack=attack_type,
-                alpha=alpha,
-                output_dir=probe_dir,
-                noniid_handler=strategy.noniid_handler,
-            )
-            strategy._probe = probe
-            atexit.register(probe.close)
-            print(f"   [PROBE] GDSProbe active → {probe_dir}")
-        except RuntimeError as _abort_err:
-            print(f"\n{'='*70}")
-            print(f"❌ ABORT: {_abort_err}")
-            print(f"{'='*70}\n")
-            raise
-
-        # [PROBE-AB] GDSProbeAB — activated by INSTRUMENT_AB_OUTDIR env var
-        _ab_outdir = os.environ.get("INSTRUMENT_AB_OUTDIR", "").strip()
-        if _ab_outdir:
-            try:
-                probe_ab = GDSProbeAB(
-                    attack=attack_type,
-                    alpha=alpha,
-                    output_dir=_ab_outdir,
-                )
-                strategy._probe_ab = probe_ab
-                atexit.register(probe_ab.close)
-                print(f"   [PROBE-AB] GDSProbeAB active → {_ab_outdir}")
-            except Exception as _pab_init_err:
-                print(f"   [PROBE-AB] init failed: {_pab_init_err}")
-
     # [PROBE-THR] ThresholdProbe — activated by THRESHOLD_PROBE_OUTPUT env var.
-    # Dataset-agnostic (unlike GDSProbe): only reads generic Layer1/Layer2 detector
-    # state, no CIFAR-specific reference tables — works for fashion-mnist too.
+    # Dataset-agnostic: only reads generic Layer1/Layer2 detector state, no
+    # CIFAR-specific reference tables — works for fashion-mnist too.
     if enable_defense:
         _thr_outpath = os.environ.get("THRESHOLD_PROBE_OUTPUT", "").strip()
         if _thr_outpath:

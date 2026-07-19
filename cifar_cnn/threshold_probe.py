@@ -1,12 +1,12 @@
 """
-ThresholdProbe — logging-only instrumentation for the L1 (median+k×MAD) threshold
+ThresholdProbe — logging-only probe for the L1 (median+k×MAD) threshold
 portability analysis. NO defense logic touched: reads Layer1Detector.last_result and
 Layer2Detector.last_stats (already computed each round for the real decision) and
 writes the RAW per-client scores to CSV, before/alongside the real threshold decision.
 
 Opt-in only: activated by the THRESHOLD_PROBE_OUTPUT env var (see server_app.py).
-Works for ANY dataset (unlike GDSProbe, which is CIFAR-10-specific) — this probe
-has no dataset-specific reference tables, it only reads generic detector state.
+Works for ANY dataset — no dataset-specific reference tables, only generic
+detector state.
 """
 
 import csv

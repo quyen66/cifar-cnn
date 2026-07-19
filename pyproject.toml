@@ -130,27 +130,7 @@ slow-poison-warmup = 5
 warmup-rounds = 10
 
 # =====================================================================
-# ADAPTIVE REFERENCE
-# =====================================================================
-# Giải quyết FPR cao khi attack corrupt current-round reference
-#
-# Formula: ref = α × historical + (1-α) × current
-#          α = clip(α_base + α_h_mult × H, α_min, α_max)
-#
-# Khi H cao (nhiều attack) → α cao → dùng historical nhiều hơn
-# Khi H thấp (ít attack)   → α thấp → dùng current nhiều hơn
-# =====================================================================
-[tool.flwr.app.config.defense.adaptive-reference]
-
-alpha-base = 0.2           # Base historical weight (khi H=0)
-alpha-h-mult = 0.5         # H multiplier (α tăng khi H tăng)
-alpha-min = 0.1            # Min historical weight (luôn giữ 1 ít historical)
-alpha-max = 0.8            # Max historical weight (không bỏ hết current)
-momentum-decay = 0.9       # EMA decay cho momentum update
-min-history-rounds = 10     # Số round tối thiểu để dùng historical
-
-# =====================================================================
-# LAYER 1: ENHANCED DBSCAN 
+# LAYER 1: ENHANCED DBSCAN
 # =====================================================================
 # CHỈ CHẠY SAU WARMUP (vòng 11+)
 # REJECTED: ||gi|| > Median + 15×MAD
@@ -388,24 +368,13 @@ use-reputation-weights = true      # Dùng reputation làm weight
 uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
 
 # =====================================================================
-# ABLATION FLAGS — endpoint ablation study (C0-C3)
-# DO NOT change manually; run_ablation.py / run_gas_ablation.py set these per config.
+# ABLATION FLAGS
+# DO NOT change manually; run_gas_ablation.py / run_stageB_compare.py set
+# these per config. alpha-blend-enabled, theta-signal-mode, gds-enabled were
+# removed after C0-C3 ablation concluded (alpha-blend OFF, theta-signal-mode
+# WARMUP_STATIC, GDS always-on — now inlined directly in server_app.py).
 # =====================================================================
 [tool.flwr.app.config.ablation]
-
-# C0: true  / C1: false / C2: false / C3: false
-# GATE (2026-07-08, GAS ablation project): reset to C0 (GOLDEN full pipeline) — was
-# left at "false" by a prior GDS-recheck test run. GAS experiment requires alpha-blend
-# and GDS ON (one-variable-at-a-time: only GAS on/off differs between G_OFF/G_ON).
-alpha-blend-enabled = true
-
-# C0: "GDS_PERROUND" / C1: "GDS_PERROUND" / C2: "WARMUP_STATIC" / C3: "WARMUP_STATIC"
-# GATE reset: WARMUP_STATIC -> GDS_PERROUND (see note above)
-theta-signal-mode = "GDS_PERROUND"
-
-# C0: true  / C1: true  / C2: true  / C3: false
-# GATE reset: false -> true (see note above)
-gds-enabled = true
 
 # =====================================================================
 # GAS LAYER — Gradient Anomaly Splitting (pure statistical filter, parallel to L1/L2)

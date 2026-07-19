@@ -6,13 +6,12 @@ from .filtering import TwoStageFilter
 from .reputation import ReputationSystem
 from .mode_controller import ModeController
 from .aggregation import (
-    Aggregator,                            
+    Aggregator,
     weighted_average_aggregation,
     trimmed_mean_aggregation,
     coordinate_median_aggregation,
     aggregate_by_mode
 )
-from .adaptive_reference import AdaptiveReferenceTracker
 
 __all__ = [
     # 1. Detection Layers
@@ -35,13 +34,10 @@ __all__ = [
     'weighted_average_aggregation',
     'trimmed_mean_aggregation',
     'coordinate_median_aggregation',
-    'aggregate_by_mode',  
-    
-    # 6. Adaptive Reference (NEW)
-    'AdaptiveReferenceTracker',
-    
+    'aggregate_by_mode',
+
 ]
 
 # Version info updated to match pyproject.toml
 __version__ = '2.1.0'
-__status__ = 'Production (Soft Pipeline V2 + Adaptive Reference)'
+__status__ = 'Production (Soft Pipeline V2)'
