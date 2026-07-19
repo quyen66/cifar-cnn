@@ -1,0 +1,90 @@
+{
+  "metadata": {
+    "generator": "generate_combined_params.py",
+    "version": "1.0.0",
+    "timestamp": "2026-05-24T06:58:29.045645",
+    "total_configs": 48,
+    "phase": "combined_sweep",
+    "optimization_layer": "Layer1 (k) \u00d7 Layer2 (dm, cosine)",
+    "grid": {
+      "k_presets": [
+        "5.0/3.0"
+      ],
+      "dm_range": [
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        3.5,
+        4.0,
+        4.5,
+        5.0
+      ],
+      "cosine_range": [
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8
+      ],
+      "n_k": 1,
+      "n_dm": 8,
+      "n_cos": 6,
+      "total_configs": 48
+    },
+    "fixed_params": {
+      "rescue_cosine_threshold": 0.9,
+      "enable_rescue": true,
+      "require_distance_pass": true
+    },
+    "rationale": "k presets from L1 analysis: {4/3, 5/3, 6/3} are best candidates. dm range 1.5-5.0: dm<1.5 creates FPR>9% (confirmed from k3_4/k3_5/k3_6). cosine range 0.3-0.8: 0.3=baseline (crude attacks), 0.8=near BEN min (0.986). ALIE/on_off unaffected by dm or cosine (overlap BEN distribution). label_flip cosine=0.905-0.974, BEN cosine=0.986+ -> threshold 0.7-0.8 may help.",
+    "k_presets_used": "5.0/3.0",
+    "estimated_hours": 288.0,
+    "estimated_days": 12.0
+  },
+  "suite": {
+    "combined_params": [
+      
+      {
+        "config_id": 18,
+        "mad_k_reject": 5.0,
+        "mad_k_flag": 3.0,
+        "distance_multiplier": 2.5,
+        "cosine_threshold": 0.8,
+        "rescue_cosine_threshold": 0.9,
+        "enable_rescue": true,
+        "require_distance_pass": true,
+        "profile": "k5_dm_mod_cos_agg",
+        "phase": "combined_sweep",
+        "note": "k=5.0/3.0 dm=2.5 cos=0.8"
+      },
+      {
+        "config_id": 24,
+        "mad_k_reject": 5.0,
+        "mad_k_flag": 3.0,
+        "distance_multiplier": 3.0,
+        "cosine_threshold": 0.8,
+        "rescue_cosine_threshold": 0.9,
+        "enable_rescue": true,
+        "require_distance_pass": true,
+        "profile": "k5_dm_mod_cos_agg",
+        "phase": "combined_sweep",
+        "note": "k=5.0/3.0 dm=3.0 cos=0.8"
+      },
+      {
+        "config_id": 18,
+        "mad_k_reject": 4.0,
+        "mad_k_flag": 3.0,
+        "distance_multiplier": 2.5,
+        "cosine_threshold": 0.8,
+        "rescue_cosine_threshold": 0.9,
+        "enable_rescue": true,
+        "require_distance_pass": true,
+        "profile": "k4_dm_mod_cos_agg",
+        "phase": "combined_sweep",
+        "note": "k=4.0/3.0 dm=2.5 cos=0.8"
+      }
+    ]
+  }
+}

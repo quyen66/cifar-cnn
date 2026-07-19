@@ -1,0 +1,18 @@
+GDS_NORM_RANGES_CIFAR_10 = {
+    'D_CV': (0.17, 0.44),
+    'D_sim': (0.01, 0.19),
+    'D_cluster': (0.14, 0.41),
+}
+
+GDS_NORM_RANGES_MNIST = {
+    'D_CV': (0.34, 0.67),
+    'D_sim': (0.00, 0.02),
+    'D_cluster': (0.31, 0.74),
+}
+
+# Calibrated từ 3 lần lặp x 4 alpha (0.1/0.25/0.5/1.0) mỗi dataset,
+# config C (cosine=0.8, dm=2.5), attack=none, round 11-40 post-warmup.
+# Dùng percentile P5-P95, mở rộng nhẹ bằng floor/ceil về 0.01.
+# QUAN TRỌNG: range của 2 dataset KHÁC NHAU — code cần switch theo
+# dataset đang chạy (đọc context.run_config['dataset']), KHÔNG dùng
+# chung 1 range cho cả hai.

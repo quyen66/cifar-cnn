@@ -1,0 +1,73 @@
+================================================================================
+MULTI-OBJECTIVE CONFIGURATION RECOMMENDATIONS
+Considers: DR (↑), FNR (↓), FPR (↓)
+================================================================================
+
+1. BEST BALANCED (Multi-Objective Optimization)
+   → Config  31:
+      • Composite Score: 79.8
+      • Avg DR:  73.1% (want HIGH)
+      • Avg FNR: 26.9% (want LOW - miss rate)
+      • Avg FPR: 4.8% (want LOW - false alarms)
+
+2. GRADIENT ATTACKS DOMINANT (MinMax/MinSum/ALIE/On-Off)
+   → Config  31: 57.8% avg DR
+      • FNR: 26.9%
+      • FPR: 4.8%
+
+3. MINIMIZE MISSED ATTACKS (Lowest FNR)
+   → Config  31: 26.9% avg FNR
+      • DR:  73.1%
+      • FPR: 4.8%
+      ⚠️  Use when attack detection is CRITICAL
+
+4. PRODUCTION READY (Low FPR < 7%)
+   → Config  31:
+      • DR:  73.1%
+      • FNR: 26.9%
+      • FPR: 4.8%
+      ⚠️  Use when false alarms are COSTLY
+
+5. MOST STABLE (Best Worst-Case Performance)
+   → Config  34: 8.1% min DR
+      • Max FNR: 92.0%
+      • Max FPR: 8.4%
+      ⚠️  Use for UNKNOWN/MIXED threat scenarios
+
+6. TOP 5 CONFIGS (Multi-Objective Composite Score)
+--------------------------------------------------------------------------------
+   1. Config  31: Composite= 79.8, DR= 73.1%, FNR= 26.9%, FPR=  4.8%
+   2. Config  30: Composite= 78.8, DR= 72.2%, FNR= 27.8%, FPR=  5.7%
+   3. Config   2: Composite= 78.1, DR= 70.6%, FNR= 29.4%, FPR=  4.3%
+   4. Config  25: Composite= 77.5, DR= 70.0%, FNR= 30.0%, FPR=  5.0%
+   5. Config  24: Composite= 77.5, DR= 69.8%, FNR= 30.2%, FPR=  4.6%
+
+================================================================================
+DEPLOYMENT GUIDE
+================================================================================
+
+Scenario                           → Recommended Config → Key Metric
+--------------------------------------------------------------------------------
+General purpose (balanced)        → Config  31        → Composite score
+Gradient attacks likely           → Config  31        → Gradient DR
+Security critical (minimize FNR)  → Config  31        → Low miss rate
+Production (minimize FPR)         → Config  31        → Low false alarms
+Unknown/mixed threat              → Config  34        → Worst-case DR
+
+================================================================================
+TRADE-OFF EXPLANATION
+================================================================================
+
+Cannot optimize all 3 metrics simultaneously:
+
+• Low FNR (aggressive) ←→ High FPR (many false alarms)
+  Example: Tight thresholds catch more attacks but flag benign clients
+
+• High DR (aggressive) ←→ High FPR (many false alarms)
+  Example: Config optimized for gradient attacks sacrifices precision
+
+• Low FPR (conservative) ←→ High FNR (miss attacks)
+  Example: Loose thresholds avoid false alarms but miss sophisticated attacks
+
+Choose config based on which metric is MOST CRITICAL for your deployment!
+================================================================================

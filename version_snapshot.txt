@@ -1,0 +1,48 @@
+# version_snapshot — GAS ablation run start
+timestamp: 2026-07-11T19:05:24.069615
+
+GATE (cổng kiểm, done in pyproject.toml before this project started):
+  GOLDEN params confirmed: dataset=cifar-10 num_clients=40 attack_ratio=0.3
+  warmup=10 total_rounds=50 cosine=0.8 mad_k_reject=4.0 distance_multiplier=2.5
+  weight_baseline=0.5 variant=B (hardcoded) prefilter_keep_ratio=0.70
+  (noniid_handler.py L178, hardcoded) GDS_WEIGHTS=0.4/0.4/0.2
+  DEVIATION FOUND + FIXED: ablation.alpha-blend-enabled/theta-signal-mode/gds-enabled
+  were left at C3 (alpha_blend=false theta=WARMUP_STATIC gds=false) by a prior GDS-recheck
+  test run. Reset to GOLDEN full pipeline (alpha_blend=true theta=GDS_PERROUND gds=true)
+  — required so G_OFF/G_ON differ ONLY in GAS.
+  L1/L2 code scan: gas_filter.py is a NEW standalone module, does not import or mutate
+  layer1_dbscan.py / layer2_detection.py / filtering.py state. Integration point in
+  server_app.py is strictly a UNION after L1/L2+detection_rejected is finalized.
+
+GAS LAYER (pure statistics, no ML) — cifar_cnn/defense/gas_filter.py:
+  p_chunks=10  chunk_seed=1234 (fixed across all seeds/rounds)
+  k_gas=2.5  prefilter_keep_ratio=0.7
+  gas_score[client] = sum over p chunks of ||sub_vector - chunk_median_reference||
+  chunk_median_reference computed over clients passing the 70%-closest-to-median
+  prefilter (same methodology as GDS, independently computed — no shared runtime state)
+  flag if gas_score > median(gas_score) + K_GAS x MAD(gas_score)  (adaptive, NOT top-k)
+  final_rejected = L1L2_rejected UNION gas_flagged
+
+CONFIGS (2, differ ONLY in ablation.gas-enabled):
+  G_OFF: golden pipeline as-is, no GAS layer
+  G_ON : golden pipeline + GAS layer (union)
+
+MATRIX:
+  2 configs x 7 attacks x 4 alphas [0.1, 0.25, 0.5, 1.0] x 6 seeds = 336 runs
+
+ATTACKS: gaussian_noise, sign_flip, label_flip, alie, on_off, minmax, slow_poison
+ALPHAS: [0.1, 0.25, 0.5, 1.0]
+SEEDS: [42, 123, 777, 2024, 31337, 8888]
+
+VERDICT THRESHOLDS (documented assumption — adjust offline if needed):
+  significant = |delta_mean| > 2 x sem_pooled
+  GAS_GIÚP = delta_DR>0 significant AND delta_FPR NOT >2.0pp significant increase
+  GAS_HẠI  = delta_FPR >2.0pp significant increase
+  GAS_HÒA  = not significant AND |delta_DR|,|delta_FPR| < 1.0pp (truly flat)
+  NHIỄU    = not significant but delta is non-trivial (ambiguous, recommend more seeds)
+
+raw_gas_ablation.csv:      per-round rows (config,attack,alpha,seed,round,DR,FPR,acc,ASR,
+                           gas_flagged_count,gas_only_caught,gas_false_flag,+ GAS diagnostics)
+agg_gas_ablation.csv:      pooled (all seeds x rounds) mean/std/sem/min/max/n per (config,attack,alpha)
+delta_gas.csv:             G_ON - G_OFF per (attack,alpha) + verdict
+gas_threshold_calib.csv:   G_ON-only separation_mad/overlap_rate/threshold-hit-rate + K-sweep per (attack,alpha)

@@ -1,0 +1,28 @@
+# version_snapshot_final — ablation run start
+timestamp: 2026-07-03T14:11:53.565338
+GDS_WEIGHTS_LOCK: cv=0.4 sim=0.4 cluster=0.2
+GOLDEN_params:
+  dataset=cifar-10  num_clients=40  attack_ratio=0.3  warmup_rounds=10
+  total_rounds=50  cosine_threshold=0.8  mad_k_reject=4.0
+  distance_multiplier=2.5  weight_baseline=0.5  variant=B
+  prefilter_keep_ratio=0.70
+G1_result: ALL GOLDEN params KHỚP (no fixes needed)
+G1b_gds_weights: CONFIRMED=0.4/0.4/0.2 (user selected)
+G2a_result: No value-altering hooks found (all probes read-only)
+G2b_result: No git repo (manual scan only)
+G2c_result: FPR=8.33% at alpha=0.5 (expected 4-8%; marginal, granularity=1/24≈4.17%)
+
+ABLATION CONFIGS:
+  C0: alpha_blend=ON,  theta_signal=GDS_PERROUND,  GDS=ON
+  C1: alpha_blend=OFF, theta_signal=GDS_PERROUND,  GDS=ON
+  C2: alpha_blend=OFF, theta_signal=WARMUP_STATIC, GDS=ON
+  C3: alpha_blend=OFF, theta_signal=WARMUP_STATIC, GDS=OFF (theta_signal→constant 0.5)
+
+C3 theta_adj note: GDS=OFF → GDS=0.5 (constant) → θ_adj_hard = hard_threshold_base
+  (hard_threshold_base=0.7, adjustment_factor=0.2: θ_adj = 0.7 + (0.5-0.5)*0.2 = 0.7)
+
+MATRIX:
+  C0,C1: 7 attacks × 4 alpha [0.1,0.25,0.5,1.0] × 3 seeds = 84 runs each
+  C2,C3: 7 attacks × 2 alpha [0.1,1.0] × 3 seeds = 42 runs each (boundary first)
+ATTACKS: gaussian_noise, sign_flip, label_flip, alie, on_off, minmax, slow_poison
+SEEDS: [42, 123, 777]

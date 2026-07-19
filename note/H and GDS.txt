@@ -1,0 +1,149 @@
+================================================================================
+CHANGE NOTES: Dual-Score Heterogeneity Refactor
+Ngày: 2026-03-22
+================================================================================
+
+## TÓM TẮT THAY ĐỔI
+
+Tách module tính heterogeneity thành 2 score độc lập, phục vụ 2 mục đích khác nhau
+trong pipeline defense:
+
+  Score cũ (1 công thức chung):
+      H = w_cv × H_CV + w_sim × H_sim + w_cluster × H_cluster
+
+  Score mới (2 công thức tách biệt):
+      GDS = w_cv × D_CV + w_sim × D_sim + w_cluster × D_cluster
+      H   = w_grad × h_grad + w_loss × h_loss + w_acc × h_acc
+
+
+================================================================================
+## MOTIVATION (để viết report)
+
+### Vấn đề của công thức cũ
+
+Công thức cũ chỉ dùng gradient geometry (CV of distances, cosine dissimilarity,
+cluster dispersion) để đo "heterogeneity", nhưng thực tế nó đo sự phân tán hình
+học của gradient trong round hiện tại — không phản ánh trực tiếp tính non-IID
+của data partition.
+
+Bằng chứng thực nghiệm (từ log Cfg1):
+  - Data partition: Dirichlet α=0.5 (non-IID thực sự)
+  - H score quan sát được: 0.05–0.15 (rất thấp)
+  - Lý do: Sau warmup 10 rounds, gradients đã converge → gradient geometry
+    trông "đồng nhất" dù data thực sự non-IID
+
+Hệ quả: H score quá thấp → θ_adj gần như không thay đổi so với θ_base → 
+Non-IID Handler gần như vô hiệu hóa.
+
+### Sự khác biệt giữa 2 signals
+
+GDS (Gradient Dispersion Score):
+  - Đo: Sự phân tán hình học của gradient vectors trong round hiện tại
+  - Input: Gradient arrays (sau pre-filter 30%)
+  - Components: CV(pairwise distances), cosine dissimilarity, cluster dispersion
+  - Vai trò: Điều chỉnh ngưỡng lọc θ_adj — khi gradient phân tán cao
+    (có thể do tấn công hoặc non-IID thực), nới lỏng ngưỡng để giảm FPR
+  - Phạm vi giá trị thực tế: 0.05–0.35
+
+H (Behavioral Heterogeneity Score):
+  - Đo: Sự phân kỳ hành vi huấn luyện giữa các clients
+  - Input: Gradient direction divergence, loss CV, accuracy CV
+  - Components: h_grad (cosine divergence), h_loss (CV of losses), h_acc (CV of accs)
+  - Vai trò: Điều khiển mode transition và reputation penalty — khi behavioral
+    divergence cao, tăng threat awareness
+  - Phạm vi giá trị thực tế: 0.15–0.55 (cao hơn vì dùng loss/acc)
+  - Detect được ALIE: CV(losses) và CV(accuracies) bắt được sự khác biệt
+    behavioral của ALIE attackers ngay cả khi gradient geometry không phát hiện
+
+### Tại sao tách thay vì kết hợp
+
+Kết hợp thẳng (α×GDS + β×H) sẽ gây cancel-out:
+  - Round có minmax: GDS cao, H_loss thấp → combined bị kéo xuống
+  - Round có ALIE: GDS thấp, H cao → combined bị kéo xuống
+
+Tách biệt cho phép mỗi signal làm đúng việc của nó:
+  - GDS → θ_adj (filter sensitivity)
+  - H   → mode controller, reputation penalty multiplier
+
+
+================================================================================
+## CÁC THAY ĐỔI CỤ THỂ
+
+### File 1: noniid_handler.py
+
+THÊM:
+  - Class `BehavioralScorer` (mới hoàn toàn):
+      * `__init__`: nhận w_grad, w_loss, w_acc từ toml
+      * `compute_h_score(gradients, losses, accuracies)`: tính H = w_grad×h_grad + w_loss×h_loss + w_acc×h_acc
+      * `_compute_h_grad(gradients)`: CV of cosine divergences
+      * `_compute_h_loss(losses)`: normalized CV of losses
+      * `_compute_h_acc(accuracies)`: normalized CV of accuracies
+
+  - Method `get_last_gds()` trong NonIIDHandler: expose GDS score riêng
+  - Đổi tên nội bộ: `last_h_score` → `last_gds_score` (trong NonIIDHandler)
+  - Method `compute_heterogeneity_score` → đổi tên thành `compute_gds`
+    (giữ alias cũ để backward compat)
+
+GIỮ NGUYÊN:
+  - Toàn bộ logic δi (baseline deviation) — không thay đổi
+  - Toàn bộ logic θ_adj — nhưng bây giờ nhận GDS thay vì H
+  - Client history tracking
+  - Test cases
+
+### File 2: server_app.py
+
+THÊM:
+  - Import `BehavioralScorer` từ noniid_handler
+  - Khởi tạo `self.behavioral_scorer` trong `_initialize_defense_components()`
+  - Tính `H_behavioral` trong aggregate_fit Phase 2 (dùng losses/accs từ fit results)
+  - In log riêng: `GDS = ...` và `H = ...`
+  - Truyền `H_behavioral` vào reputation.update() và mode_controller
+  - Truyền `GDS` vào two_stage_filter (cho θ_adj)
+
+THAY ĐỔI:
+  - `defense_params['noniid']`: thêm các key mới (w_grad, w_loss, w_acc)
+  - Dòng `H = H_early` → tách thành `GDS = ...` và `H = ...`
+  - Log line `Heterogeneity Score H = ...` → in cả 2 scores
+
+GIỮ NGUYÊN:
+  - Tất cả signature của Layer1, Layer2, ConfidenceScorer
+  - Warmup logic
+  - Checkpoint logic
+
+### File 3: pyproject.toml
+
+THÊM section mới `[tool.flwr.app.config.defense.noniid]`:
+  - `weight-grad`, `weight-loss`, `weight-acc` (cho H score)
+  - Giữ `weight-cv`, `weight-sim`, `weight-cluster` (cho GDS)
+
+ĐỔI TÊN comment: "H Score weights" → "GDS weights (Gradient Dispersion Score)"
+
+
+================================================================================
+## GỢI Ý VIẾT REPORT
+
+### Tên trong thesis
+
+  - GDS: "Gradient Dispersion Score" — dùng để điều chỉnh ngưỡng lọc thích ứng
+  - H:   "Behavioral Heterogeneity Score" — dùng để đánh giá mức độ đe dọa
+
+### Câu mô tả đề xuất (English)
+
+"We decompose the heterogeneity measurement into two complementary signals serving
+distinct roles in the defense pipeline. The Gradient Dispersion Score (GDS) captures
+geometric spread of gradient updates to adaptively calibrate detection thresholds,
+while the Behavioral Heterogeneity Score (H) measures divergence in training behavior
+(gradient direction, loss, accuracy) to modulate threat assessment and reputation
+penalties. This separation prevents conflating environment-awareness (GDS) with
+threat-level estimation (H), and empirically improves detection of statistical attacks
+such as ALIE whose gradient geometry is indistinguishable from benign clients."
+
+### Ablation study angle
+
+Có thể chạy 3 configs:
+  1. GDS-only (current baseline): H dùng gradient geometry
+  2. H-only: chỉ dùng behavioral score
+  3. Dual (proposed): GDS cho filter, H cho mode/reputation
+→ So sánh DR trên ALIE + FPR trên benign
+
+================================================================================

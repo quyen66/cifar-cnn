@@ -1,0 +1,47 @@
+TEST: OPT3C_lambda_rej_hmult_050
+Parameter: [tool.flwr.app.config.defense.reputation] lambda-rejected-h-mult = 0.5
+Date: 2026-03-19 17:35:32
+Attacks: none, alie, backdoor, gaussian_noise, label_flip, minmax, minsum, on_off, random_noise, sign_flip, slow_poison
+
+=======================================================
+RAW RESULTS
+=======================================================
+Attack             Avg DR   Avg FPR   L10 DR   L10 FPR Modes
+----------------------------------------------------------------------
+none                 8.6%      5.7%     3.1%      2.3%  {'DEFENSE': 2, 'NORMAL': 28}
+alie                55.8%      6.2%    72.9%      1.3%  {'DEFENSE': 11, 'NORMAL': 19}
+backdoor            99.3%      4.3%   100.0%      2.2%  {'DEFENSE': 16, 'ALERT': 14}
+gaussian_noise     100.0%      3.7%   100.0%      2.9%  {'DEFENSE': 18, 'ALERT': 12}
+label_flip          58.7%      9.3%   100.0%      3.2%  {'DEFENSE': 5, 'NORMAL': 13, 'ALERT': 12}
+minmax              50.5%      8.3%    15.4%      9.2%  {'DEFENSE': 13, 'ALERT': 6, 'NORMAL': 11}
+minsum              36.5%      8.6%     3.2%      4.6%  {'DEFENSE': 6, 'ALERT': 7, 'NORMAL': 17}
+on_off              54.2%      5.1%    52.0%      6.9%  {'DEFENSE': 30}
+random_noise       100.0%      2.2%   100.0%      1.8%  {'DEFENSE': 10, 'ALERT': 20}
+sign_flip          100.0%      5.2%   100.0%      1.4%  {'DEFENSE': 8, 'ALERT': 22}
+slow_poison         80.9%      6.0%   100.0%      2.6%  {'DEFENSE': 10, 'NORMAL': 7, 'ALERT': 13}
+
+Overall DR: 73.6%  FPR: 5.9%
+
+================================================================================
+COMPARISON vs BASELINE — OPT3C_lambda_rej_hmult_050
+================================================================================
+Attack           Base DR Test DR     ΔDR | Base FPR Test FPR    ΔFPR |  L10 DR | Verdict
+-------------------------------------------------------------------------------------
+none                4.7%    8.6%   +3.9% |     5.8%     5.7%   -0.1% |    3.1% | ✅ OK
+alie               50.2%   55.8%   +5.6% |    10.2%     6.2%   -4.0% |   72.9% | ✅ BETTER
+backdoor           99.3%   99.3%   +0.0% |     4.8%     4.3%   -0.5% |  100.0% | ✅ STABLE
+gaussian_noise    100.0%  100.0%   +0.0% |     3.2%     3.7%   +0.5% |  100.0% | ✅ STABLE
+label_flip         56.1%   58.7%   +2.6% |     4.2%     9.3%   +5.1% |  100.0% | ❌ FPR HIGH
+minmax             61.4%   50.5%  -10.9% |     8.1%     8.3%   +0.2% |   15.4% | ❌ REGRESS ←target
+minsum             55.8%   36.5%  -19.3% |     9.1%     8.6%   -0.5% |    3.2% | ❌ REGRESS ←target
+on_off             54.8%   54.2%   -0.6% |     5.0%     5.1%   +0.1% |   52.0% | ✅ STABLE
+random_noise      100.0%  100.0%   +0.0% |     3.7%     2.2%   -1.5% |  100.0% | ✅ STABLE
+sign_flip         100.0%  100.0%   +0.0% |     5.4%     5.2%   -0.2% |  100.0% | ✅ STABLE
+slow_poison        79.6%   80.9%   +1.3% |     3.7%     6.0%   +2.3% |  100.0% | ⚠️ MIXED
+-------------------------------------------------------------------------------------
+OVERALL (excl none)                   -2.1% |                     +0.2%
+
+================================================================================
+DECISION: ❌ REVERT — 3 regressions: ['label_flip', 'minmax', 'minsum']
+NEXT:     Restore config. If partial success, try smaller value (bisect).
+================================================================================

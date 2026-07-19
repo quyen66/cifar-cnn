@@ -1,0 +1,12 @@
+Mục đích:
+
+Smooth H-score bằng EMA
+Tránh threshold nhảy lung tung
+Làm defense ổn định hơn
+
+# EMA Smoothing
+if self.h_score_history:  # Check có history không
+    prev_H = self.h_score_history[-1]
+    smooth_H = 0.7 * current_H + 0.3 * prev_H
+else:
+    smooth_H = current_H  # Round đầu

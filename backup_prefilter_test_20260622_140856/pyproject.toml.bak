@@ -1,0 +1,387 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cifar-cnn"
+version = "2.0.0"
+description = "Federated Learning với Hybrid Adaptive Defense System (V2 - main.pdf)"
+license = "Apache-2.0"
+dependencies = [
+    "flwr[simulation]>=1.22.0",
+    "flwr-datasets[vision]>=0.5.0",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "quyen"
+
+[tool.flwr.app.components]
+serverapp = "cifar_cnn.server_app:app"
+clientapp = "cifar_cnn.client_app:app"
+
+# =====================================================================
+# FEDERATED LEARNING CONFIGURATION
+# =====================================================================
+[tool.flwr.app.config]
+
+num-clients = 40
+num-server-rounds = 40
+fraction-fit = 0.6
+fraction-evaluate = 0.2
+min-fit-clients = 24
+min-evaluate-clients = 6
+min-available-clients = 40
+
+local-epochs = 5
+batch-size = 128
+learning-rate = 0.001
+proximal-mu = 0.01
+
+partition-type = "dirichlet"
+alpha = 0.1
+
+use-mixed-precision = true
+num-workers = 2
+pin-memory = true
+persistent-workers = true
+
+auto-save = true
+save-dir = "saved_models/prefilter_compare/cifar-10/alpha_1_0_rep2"
+save-interval = 10
+resume-from = ""
+
+# cifar-10, femnist, fashion-mnist
+dataset = "fashion-mnist"
+
+enable-defense = true
+
+# --- ATTACK CONFIGURATION ---
+# Options: "none", "random_noise", "gaussian_noise", "sign_flip", "label_flip", "backdoor", "alie", "minmax", "minsum", "on_off", "slow_poison"
+attack-type = "none" 
+attack-ratio = 0.0          # 30% clients là attackers
+
+# 1. Random Noise (Uniform)
+random-noise-scale = 0.7   # Biên độ nhiễu Uniform [-scale, scale]
+
+# 2. Gaussian Noise
+gaussian-noise-std = 0.5  # Độ lệch chuẩn của nhiễu Gaussian
+
+# 4. Label Flipping
+flip-probability = 1.0
+flip-type = "reverse"       # "reverse" (0->9) hoặc "random"
+
+# 5. Backdoor
+backdoor-label = 0          # Nhãn mục tiêu
+backdoor-pixel-count = 4    # Số lượng pixel trigger
+backdoor-pattern-size = 3   # Kích thước vùng trigger
+backdoor-scaling-factor = 1.0
+
+# 6. ALIE (A Little Is Enough)
+alie-z = 2.0        # Hệ số z 
+
+# 7. Min-Max
+minmax-gamma = 10.0         # Hệ số scale cho Min-Max attack
+
+# 8. On-off
+# Tần suất attack: mỗi N rounds attack 1 lần (default: 5 = 20% attack)
+onoff-frequency = 5
+
+# Loại attack khi active:
+# - "sign_flip": Đảo ngược gradient (strongest)
+# - "scale": Scale gradient lên (gây nhiễu)
+# - "noise": Thêm noise mạnh
+# - "zero": Không đóng góp (free-rider style)
+onoff-attack = "sign_flip"
+
+# Cường độ attack (cho mode "scale" và "noise")
+onoff-attack-scale = 1.0
+
+# 9. Slow Poison 
+# Tỷ lệ poison mỗi round (0.1 = 10% poison + 90% benign)
+slow-poison-rate = 0.5
+
+# Hướng poison:
+# - "negative": Ngược hoàn toàn với benign (default)
+# - "random": Hướng ngẫu nhiên
+# - "targeted": Bias về một hướng cố định
+# - "drift": Negative với strength tăng dần
+slow-poison-direction = "random"
+
+# Số rounds đầu hoàn toàn benign (build trust trước)
+slow-poison-warmup = 5
+
+
+# =====================================================================
+# WARMUP PHASE (Vòng 1-10)
+# =====================================================================
+# QUAN TRỌNG: Trong warmup, TẤT CẢ defense modules bị BYPASS
+# - Layer 1, Layer 2: Disabled
+# - Hard/Soft Filter: Disabled  
+# - Chỉ dùng trusted clients (Strust), R=1.0, mode=NORMAL
+# - Mục đích: Hội tụ mô hình trên dữ liệu sạch
+# Sau warmup (vòng 11+): Defense kích hoạt, clients mới có Rinit=0.25
+# =====================================================================
+warmup-rounds = 10
+
+# =====================================================================
+# ADAPTIVE REFERENCE
+# =====================================================================
+# Giải quyết FPR cao khi attack corrupt current-round reference
+#
+# Formula: ref = α × historical + (1-α) × current
+#          α = clip(α_base + α_h_mult × H, α_min, α_max)
+#
+# Khi H cao (nhiều attack) → α cao → dùng historical nhiều hơn
+# Khi H thấp (ít attack)   → α thấp → dùng current nhiều hơn
+# =====================================================================
+[tool.flwr.app.config.defense.adaptive-reference]
+
+alpha-base = 0.2           # Base historical weight (khi H=0)
+alpha-h-mult = 0.5         # H multiplier (α tăng khi H tăng)
+alpha-min = 0.1            # Min historical weight (luôn giữ 1 ít historical)
+alpha-max = 0.8            # Max historical weight (không bỏ hết current)
+momentum-decay = 0.9       # EMA decay cho momentum update
+min-history-rounds = 10     # Số round tối thiểu để dùng historical
+
+# =====================================================================
+# LAYER 1: ENHANCED DBSCAN 
+# =====================================================================
+# CHỈ CHẠY SAU WARMUP (vòng 11+)
+# REJECTED: ||gi|| > Median + 15×MAD
+# FLAGGED: ||gi|| > Median + 4×MAD  
+# ACCEPTED: còn lại
+# PCA: dpca = min(20, floor(0.5×n))
+# =====================================================================
+[tool.flwr.app.config.defense.layer1]
+
+pca-dims = 20
+dbscan-min-samples = 3
+dbscan-eps-multiplier = 1.5
+mad-k-reject = 6.0
+mad-k-flag = 3.0
+voting-threshold = 3
+zero-cluster-action = "accept_all"
+
+# =====================================================================
+# LAYER 2: DISTANCE + DIRECTION 
+# =====================================================================
+# CHỈ CHẠY SAU WARMUP
+[tool.flwr.app.config.defense.layer2]
+
+distance-multiplier = 2.5
+cosine-threshold = 0.8
+
+enable-rescue = true
+
+rescue-cosine-threshold = 0.9     
+require-distance-pass = true       
+
+# =====================================================================
+# NON-IID HANDLER
+# =====================================================================
+# H = 0.4×H_CV + 0.4×H_sim + 0.2×H_cluster
+# θ_adj = clip(θbase + (H-0.5)×0.4, 0.5, 0.9)
+# =====================================================================
+[tool.flwr.app.config.defense.noniid]
+
+# GDS weights (must sum to 1.0)
+weight-cv = 0.4
+weight-sim = 0.4
+weight-cluster = 0.2
+
+# θ_adj parameters 
+adjustment-factor = 0.2
+theta-adj-clip-min = 0.5
+theta-adj-clip-max = 0.8
+
+# Baseline tracking
+baseline-window-size = 10
+
+# δi weights
+delta-norm-weight = 0.5
+delta-direction-weight = 0.5
+
+# EMA decay cho running mean gradient
+grad-ema-decay = 0.3
+
+#=====================================================================
+# BEHAVIORAL SCORER — Behavioral Heterogeneity Score (H)
+# =====================================================================
+# H = w_grad × h_grad + w_loss × h_loss + w_acc × h_acc
+#
+# h_grad: mean pairwise cosine divergence giữa gradient vectors
+# h_loss: normalized CV của local training losses   (detect ALIE)
+# h_acc:  normalized CV của local training accuracies (detect ALIE)
+#
+# Variant A: H → θ_adj + mode controller + reputation penalty
+# Variant B: H → mode controller + reputation penalty only
+#
+# Lưu ý: cần client trả về train_loss và train_accuracy trong metrics.
+#   Nếu không có → h_loss = h_acc = 0, H chỉ dùng h_grad (vẫn chạy).
+# =====================================================================
+[tool.flwr.app.config.defense.behavioral]
+ 
+# H weights (must sum to 1.0)
+weight-grad = 0.4   # Gradient direction divergence
+weight-loss = 0.3   # CV of local training losses
+weight-acc  = 0.3   # CV of local training accuracies
+
+# =====================================================================
+# CONFIDENCE SCORING 
+# =====================================================================
+# ci = clip((weight-flagged×I_Flagged + weight-euclidean×I_Fail_Euclidean + weight-baseline×δi) × factor, 0, 1)
+# =====================================================================
+[tool.flwr.app.config.defense.confidence]
+
+weight-flagged = 0.3
+weight-euclidean = 0.2
+weight-baseline = 0.5
+
+baseline-suspicious-threshold = 0.15
+baseline-factor-suspicious = 0.7
+
+rescued-penalty = 0.4 
+rescued-suspicious-penalty = 0.7
+rescued_euclidean = 0.5
+
+# =====================================================================
+# TWO-STAGE FILTERING
+# =====================================================================
+# CHỈ CHẠY SAU WARMUP
+# Hard: ci > θ_adj(base=0.85)
+# Soft: ci > θ_adj(base=0.06) AND R < R_floor (mode-independent)
+# =====================================================================
+[tool.flwr.app.config.defense.filtering]
+
+# Ngưỡng cơ sở (θ_base)
+hard-threshold-base = 0.7
+soft-threshold-base = 0.06
+
+# R_floor - ngưỡng reputation cố định (mode-independent)
+soft-rep-floor = 0.30
+
+# =====================================================================
+# REPUTATION SYSTEM 
+# =====================================================================
+# Tất cả tham số có thể tinh chỉnh để tối ưu hệ thống
+#
+# CÔNG THỨC CHÍNH (từ main.pdf):
+# 1. P(i,t) = 0.5×(Cosine(gi, gmedian) + 1)
+# 2. C(i,t) = consistency-p-weight×P + consistency-history-weight×C(t-1)
+# 3. rraw = raw-c-weight×C + raw-p-weight×P
+# 4. radjusted = rraw × λ(H, status)
+# 5. R(i,t) = (1-α)×R(i,t-1) + α×radjusted
+#
+# LAMBDA PENALTY:
+# - Clean: λ = lambda-clean
+# - Suspicious: λ = lambda-suspicious-base + lambda-suspicious-h-mult × H
+# - Rejected: λ = lambda-rejected-base + lambda-rejected-h-mult × H
+# =====================================================================
+[tool.flwr.app.config.defense.reputation]
+
+# --- EMA Parameters (Asymmetric Update) ---
+# α khi reputation TĂNG (slow reward - cho cơ hội chứng minh)
+ema-alpha-increase = 0.1
+# α khi reputation GIẢM (fast penalty - phản ứng nhanh với tấn công)
+ema-alpha-decrease = 0.5
+
+# --- Lambda Penalty Parameters ---
+# λ cho clean clients (không bị flag ở bất kỳ layer nào)
+lambda-clean = 1.0
+# λ cho suspicious clients (bị Layer1 flag nhưng được Layer2 rescue)
+# λ = base + h_mult × H → [0.6, 0.8] khi H ∈ [0, 1]
+lambda-suspicious-base = 0.5
+lambda-suspicious-h-mult = 0.2
+# λ cho rejected clients (bị detection loại bỏ)
+# λ = base + h_mult × H → [0.1, 0.5] khi H ∈ [0, 1]
+lambda-rejected-base = 0.05
+lambda-rejected-h-mult = 0.3
+
+# --- Probation Parameters (Floor Lifting) ---
+# Ngưỡng R để client vào probation (theo dõi đặc biệt)
+floor-warning-threshold = 0.25
+# Số vòng hành vi tốt liên tục để thoát probation
+floor-probation-rounds = 5
+
+# --- Initial Values ---
+# R khởi tạo cho clients mới (sau warmup)
+initial-reputation = 0.25
+# R cho trusted clients (trong warmup phase)
+trusted-reputation = 1.0
+
+# --- Formula Weights: Consistency ---
+# C(i,t) = w_p×P(i,t) + w_hist×C(i,t-1)
+# Weight cho P trong công thức C (PDF: 0.6)
+consistency-p-weight = 0.6
+# Weight cho history trong công thức C (PDF: 0.4)
+consistency-history-weight = 0.4
+
+# --- Formula Weights: Raw Score ---
+# rraw = w_c×C + w_p×P
+# Weight cho C trong raw score (PDF: 0.5)
+raw-c-weight = 0.5
+# Weight cho P trong raw score (PDF: 0.5)
+raw-p-weight = 0.5
+
+# --- History Parameters ---
+# Số vòng lưu lịch sử cosine similarity
+history-window-size = 10
+
+# =====================================================================
+# MODE CONTROLLER — REMOVED: replaced by R_i weighted aggregation
+# =====================================================================
+# [tool.flwr.app.config.defense.mode]
+#
+# threshold-normal-to-alert = 0.20
+# threshold-alert-to-defense = 0.35
+# hysteresis-rounds = 2
+# trust-breach-count = 3
+# trust-breach-threshold = 0.85
+# rep-drop-threshold = 0.08
+# initial-mode = "NORMAL"
+# safe-weight-epsilon = 1e-6
+
+# =====================================================================
+# AGGREGATION (V2) - FULLY CONFIGURABLE
+# =====================================================================
+# Công thức từ PDF:
+# 1. NORMAL (Weighted Average):
+#    - gglobal = Σ(R(i,t)/SR × gi) nếu SR > ε
+#    - gglobal = 1/|T| × Σgi nếu SR ≤ ε (fallback FedAvg)
+#
+# 2. ALERT (Trimmed Mean):
+#    - k = ⌊max(trim_ratio_min, ρ) × |T|⌋
+#    - Cắt k giá trị cao nhất và thấp nhất mỗi chiều
+#
+# 3. DEFENSE (Coordinate Median):
+#    - gglobal[j] = Median({gi[j] : i ∈ T})
+#    - Breakdown point: 50%
+# =====================================================================
+[tool.flwr.app.config.defense.aggregation]
+
+# Safe Weight Parameters
+safe-weight-epsilon = 1e-6         # ε để check SR > 0
+
+# Trimmed Mean Parameters — not used in main aggregation path
+# trim-ratio-min = 0.1
+# trim-ratio-max = 0.4
+
+# Weighted Average Parameters
+use-reputation-weights = true      # Dùng reputation làm weight
+uniform-weight-fallback = true     # Fallback về uniform nếu SR ≤ ε
+
+# =====================================================================
+# FEDERATION
+# =====================================================================
+[tool.flwr.federations]
+default = "local-simulation"
+
+[tool.flwr.federations.local-simulation]
+options.num-supernodes = 40
+options.backend.client-resources.num-cpus = 1
+options.backend.client-resources.num-gpus = 0.05

@@ -155,6 +155,20 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Raw datasets (large, reproducible via download)
+data/
+
+# Large raw experiment logs (results summarized separately; too large for git history)
+instrument_l1/
+instrument_l2/
+instrument_l3/
+combined_param_logs_v1/
+gds_param_logs_0,1/
+gds_param_logs_0,25/
+gds_param_logs_0,5/
+gds_param_logs_1/
+AGG_GDS_RECHECK/
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
