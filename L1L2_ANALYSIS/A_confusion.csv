@@ -1,0 +1,9 @@
+dataset,alpha,L1_rej_L2_rej,L1_rej_L2_acc,L1_acc_L2_rej,L1_acc_L2_acc
+cifar-10,0.1,1829,0,6654,11677
+cifar-10,0.25,2235,0,2733,15192
+cifar-10,0.5,2428,0,2271,18341
+cifar-10,1.0,1795,0,1591,19654
+fashion-mnist,0.1,2116,0,2821,15223
+fashion-mnist,0.25,2490,0,1808,15862
+fashion-mnist,0.5,1792,0,1551,19697
+fashion-mnist,1.0,2040,0,2041,18959
