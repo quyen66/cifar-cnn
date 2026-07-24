@@ -1,9 +1,0 @@
-dataset,alpha,n_l1_only_total,n_l1_only_attacker,n_l1_only_benign
-cifar-10,0.1,0,0,0
-cifar-10,0.25,0,0,0
-cifar-10,0.5,0,0,0
-cifar-10,1.0,0,0,0
-fashion-mnist,0.1,0,0,0
-fashion-mnist,0.25,0,0,0
-fashion-mnist,0.5,0,0,0
-fashion-mnist,1.0,0,0,0

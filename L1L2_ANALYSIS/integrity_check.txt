@@ -1,9 +1,0 @@
-Ô thiếu log: 12 — [('cifar-10', 'none', '0.1', '123'), ('cifar-10', 'none', '0.1', '42'), ('cifar-10', 'none', '0.1', '777'), ('cifar-10', 'none', '0.25', '123'), ('cifar-10', 'none', '0.25', '42'), ('cifar-10', 'none', '0.25', '777'), ('fashion-mnist', 'none', '0.1', '123'), ('fashion-mnist', 'none', '0.1', '42'), ('fashion-mnist', 'none', '0.1', '777'), ('fashion-mnist', 'none', '0.25', '123'), ('fashion-mnist', 'none', '0.25', '42'), ('fashion-mnist', 'none', '0.25', '777')]
-Ô có số vòng parse được < 35 (kỳ vọng ~40): 0
-Dòng round_meta không nhất quán (n_l1_rejected+flagged+accepted != n_total): 0
-Dòng có số attacker GT lệch > 3 so với kỳ vọng attack_ratio*n_total: 88
-
-Chi tiết ô thiếu round:
-Empty DataFrame
-Columns: [dataset, attack, alpha, seed, n_rounds]
-Index: []
